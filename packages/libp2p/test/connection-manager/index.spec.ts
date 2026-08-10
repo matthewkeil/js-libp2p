@@ -162,6 +162,19 @@ describe('Connection Manager', () => {
     expect(dialQueueStop.calledOnce).to.be.true()
   })
 
+  it('should stop queues when startup did not complete', async () => {
+    connectionManager = new DefaultConnectionManager(components, defaultOptions)
+    const reconnectQueueStop = sinon.spy(connectionManager.reconnectQueue, 'stop')
+    const dialQueueStop = sinon.spy(connectionManager.dialQueue, 'stop')
+    const connectionPrunerStop = sinon.spy(connectionManager.connectionPruner, 'stop')
+
+    await connectionManager.stop()
+
+    expect(reconnectQueueStop.calledOnce).to.be.true()
+    expect(dialQueueStop.calledOnce).to.be.true()
+    expect(connectionPrunerStop.calledOnce).to.be.true()
+  })
+
   it('should allow connections from allowlist multiaddrs (IPv6)', async () => {
     const remoteAddr = multiaddr('/ip6/2001:db8::1/tcp/59283')
     const connectionManager = new DefaultConnectionManager(components, {

@@ -409,7 +409,11 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
     this.events.removeEventListener('connection:open', this.onConnect)
     this.events.removeEventListener('connection:close', this.onDisconnect)
 
-    await stop(this.connectionPruner)
+    await stop(
+      this.reconnectQueue,
+      this.dialQueue,
+      this.connectionPruner
+    )
 
     // Close all connections we're tracking
     const tasks: Array<Promise<any>> = []
