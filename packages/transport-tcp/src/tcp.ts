@@ -28,8 +28,10 @@
  */
 
 import net from 'net'
-import { AbortError, TimeoutError, serviceCapabilities, transportSymbol } from '@libp2p/interface'
+import { AbortError, NotStartedError, TimeoutError, serviceCapabilities, transportSymbol } from '@libp2p/interface'
 import { TCP as TCPMatcher } from '@multiformats/multiaddr-matcher'
+import { anySignal } from 'any-signal'
+import { setMaxListeners } from 'main-event'
 import { CustomProgressEvent } from 'progress-events'
 import { TCPListener } from './listener.ts'
 import { toMultiaddrConnection } from './socket-to-conn.ts'
@@ -39,16 +41,39 @@ import type { Logger, Connection, Transport, Listener, MultiaddrConnection } fro
 import type { Multiaddr } from '@multiformats/multiaddr'
 import type { Socket, IpcSocketConnectOpts, TcpSocketConnectOpts } from 'net'
 
+async function closeSocket (socket: Socket): Promise<void> {
+  if (socket.closed) {
+    return
+  }
+
+  const closed = new Promise<void>((resolve) => {
+    socket.once('close', () => {
+      resolve()
+    })
+  })
+
+  socket.destroy()
+  await closed
+}
+
 export class TCP implements Transport<TCPDialEvents> {
   private readonly opts: TCPOptions
   private readonly metrics?: TCPMetrics
   private readonly components: TCPComponents
   private readonly log: Logger
+  private readonly pendingDialOperations: Set<Promise<void>>
+  private acceptingDials: boolean
+  private shutdownController: AbortController
+  private shutdownPromise?: Promise<void>
 
   constructor (components: TCPComponents, options: TCPOptions = {}) {
     this.log = components.logger.forComponent('libp2p:tcp')
     this.opts = options
     this.components = components
+    this.pendingDialOperations = new Set()
+    this.acceptingDials = true
+    this.shutdownController = new AbortController()
+    setMaxListeners(Infinity, this.shutdownController.signal)
 
     if (components.metrics != null) {
       this.metrics = {
@@ -72,7 +97,65 @@ export class TCP implements Transport<TCPDialEvents> {
     '@libp2p/transport'
   ]
 
+  start (): void {
+    this.acceptingDials = true
+    this.shutdownController = new AbortController()
+    setMaxListeners(Infinity, this.shutdownController.signal)
+    this.shutdownPromise = undefined
+  }
+
+  async beforeStop (): Promise<void> {
+    if (this.shutdownPromise != null) {
+      return this.shutdownPromise
+    }
+
+    this.acceptingDials = false
+    this.shutdownController.abort(new AbortError('TCP transport is stopping'))
+
+    // Every admitted dial registers its completion before invoking user code,
+    // so this set cannot grow after acceptingDials is cleared.
+    this.shutdownPromise = Promise.all([...this.pendingDialOperations]).then(() => undefined)
+    await this.shutdownPromise
+  }
+
+  async stop (): Promise<void> {
+    await this.beforeStop()
+  }
+
   async dial (ma: Multiaddr, options: TCPDialOptions): Promise<Connection> {
+    if (!this.acceptingDials) {
+      throw new NotStartedError('TCP transport is not started')
+    }
+
+    // Defer execution until after the completion promise is registered. This
+    // prevents progress callbacks and synchronous DNS lookups from starting
+    // shutdown before this dial is represented in pendingDialOperations.
+    const operation = Promise.resolve().then(async () => {
+      const signal = anySignal([
+        options.signal,
+        this.shutdownController.signal
+      ])
+
+      try {
+        return await this.performDial(ma, {
+          ...options,
+          signal
+        })
+      } finally {
+        signal.clear()
+      }
+    })
+    const completion = operation.then(() => undefined, () => undefined)
+
+    this.pendingDialOperations.add(completion)
+    void completion.finally(() => {
+      this.pendingDialOperations.delete(completion)
+    })
+
+    return operation
+  }
+
+  private async performDial (ma: Multiaddr, options: TCPDialOptions): Promise<Connection> {
     options.keepAlive = options.keepAlive ?? true
     options.noDelay = options.noDelay ?? true
     options.allowHalfOpen = options.allowHalfOpen ?? false
@@ -93,17 +176,28 @@ export class TCP implements Transport<TCPDialEvents> {
       })
     } catch (err: any) {
       this.metrics?.errors.increment({ outbound_to_connection: true })
-      socket.destroy(err)
+      await closeSocket(socket)
       throw err
     }
 
     try {
       this.log('new outbound connection %s', maConn.remoteAddr)
-      return await options.upgrader.upgradeOutbound(maConn, options)
+      const connection = await options.upgrader.upgradeOutbound(maConn, options)
+      options.signal.throwIfAborted()
+
+      return connection
     } catch (err: any) {
       this.metrics?.errors.increment({ outbound_upgrade: true })
       this.log.error('error upgrading outbound connection - %e', err)
+      const closed = socket.closed
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+          socket.once('close', () => {
+            resolve()
+          })
+        })
       maConn.abort(err)
+      await closed
       throw err
     }
   }
@@ -111,10 +205,12 @@ export class TCP implements Transport<TCPDialEvents> {
   async _connect (ma: Multiaddr, options: TCPDialOptions): Promise<Socket> {
     options.signal.throwIfAborted()
     options.onProgress?.(new CustomProgressEvent('tcp:open-connection'))
+    options.signal.throwIfAborted()
 
     let rawSocket: Socket
 
     return new Promise<Socket>((resolve, reject) => {
+      let settled = false
       const start = Date.now()
       const cOpts = multiaddrToNetConfig(ma, {
         ...(this.opts.dialOpts ?? {}),
@@ -150,10 +246,15 @@ export class TCP implements Transport<TCPDialEvents> {
       const onAbort = (): void => {
         this.log('connection aborted %a', ma)
         this.metrics?.events.increment({ abort: true })
-        done(new AbortError())
+        done(options.signal.reason instanceof Error ? options.signal.reason : new AbortError())
       }
 
       const done = (err?: Error): void => {
+        if (settled) {
+          return
+        }
+
+        settled = true
         rawSocket.removeListener('error', onError)
         rawSocket.removeListener('timeout', onTimeout)
         rawSocket.removeListener('connect', onConnect)
@@ -173,10 +274,20 @@ export class TCP implements Transport<TCPDialEvents> {
       rawSocket.on('timeout', onTimeout)
       rawSocket.on('connect', onConnect)
 
-      options.signal.addEventListener('abort', onAbort)
+      options.signal.addEventListener('abort', onAbort, { once: true })
+
+      // net.connect() can invoke a user-supplied lookup function before it
+      // returns. If that function started shutdown, the abort event occurred
+      // before the listener above was installed.
+      if (options.signal.aborted) {
+        onAbort()
+      }
     })
-      .catch(err => {
-        rawSocket?.destroy()
+      .catch(async err => {
+        if (rawSocket != null) {
+          await closeSocket(rawSocket)
+        }
+
         throw err
       })
   }
