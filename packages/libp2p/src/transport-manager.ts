@@ -257,12 +257,21 @@ export class DefaultTransportManager implements TransportManager, Startable {
     for (const [key, transport] of this.transports.entries()) {
       const supportedAddrs = transport.listenFilter(addrs)
 
+      if (!this.isStarted()) {
+        throw new NotStartedError('Not started')
+      }
+
       // For each supported multiaddr, create a listener
       for (const addr of supportedAddrs) {
         this.log('creating listener for %s on %a', key, addr)
         const listener = transport.createListener({
           upgrader: this.components.upgrader
         })
+
+        if (!this.isStarted()) {
+          await listener.close()
+          throw new NotStartedError('Not started')
+        }
 
         let listeners: Listener[] = this.listeners.get(key) ?? []
 

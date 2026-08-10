@@ -265,6 +265,30 @@ describe('Transport Manager', () => {
     ])
   })
 
+  it('should close a listener created while shutdown starts', async () => {
+    const close = Sinon.stub().resolves()
+    const shutdownTransport = stubInterface<Transport>({
+      dialFilter: (addrs) => addrs,
+      listenFilter: (addrs) => addrs,
+      createListener: () => {
+        void tm.beforeStop()
+
+        return stubInterface<Listener>({
+          close
+        })
+      }
+    })
+    shutdownTransport[Symbol.toStringTag] = 'reentrant-shutdown-transport'
+    tm.add(shutdownTransport)
+
+    await expect(tm.listen([addrs[0]]))
+      .to.eventually.be.rejected()
+      .and.to.have.property('name', 'NotStartedError')
+
+    expect(close.calledOnce).to.be.true()
+    expect(tm.getListeners()).to.be.empty()
+  })
+
   it('should remove listeners when they stop listening', async () => {
     tm.add(transport)
 
