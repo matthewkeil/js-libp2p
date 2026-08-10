@@ -1,5 +1,5 @@
 import net from 'node:net'
-import { AlreadyStartedError, InvalidParametersError, NotStartedError } from '@libp2p/interface'
+import { AlreadyStartedError, InvalidParametersError } from '@libp2p/interface'
 import { getThinWaistAddresses } from '@libp2p/utils'
 import { multiaddr } from '@multiformats/multiaddr'
 import { TypedEventEmitter, setMaxListeners } from 'main-event'
@@ -54,6 +54,7 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
   private addr: string
   private readonly log: Logger
   private readonly shutdownController: AbortController
+  private serverClosePromise?: Promise<unknown>
 
   constructor (private readonly context: Context) {
     super()
@@ -156,7 +157,7 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
 
     if (this.status.code !== TCPListenerStatusCode.ACTIVE) {
       socket.destroy()
-      throw new NotStartedError('Server is not listening yet')
+      return
     }
 
     let maConn: MultiaddrConnection
@@ -268,12 +269,11 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
   async close (options?: AbortOptions): Promise<void> {
     const events: Array<Promise<unknown>> = []
 
-    if (this.server.listening) {
-      events.push(pEvent(this.server, 'close', options))
-    }
+    this.stopAccepting()
 
-    // shut down the server socket, permanently
-    this.pause(true)
+    if (this.serverClosePromise != null) {
+      events.push(this.serverClosePromise)
+    }
 
     // stop any in-progress connection upgrades
     this.shutdownController.abort()
@@ -281,13 +281,19 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
     // synchronously close any open connections - should be done after closing
     // the server socket in case new sockets are opened during the shutdown
     this.sockets.forEach(socket => {
-      if (socket.readable) {
+      if (!socket.closed) {
         events.push(pEvent(socket, 'close', options))
         socket.destroy()
       }
     })
 
     await Promise.all(events)
+  }
+
+  stopAccepting (): void {
+    // Closing net.Server synchronously closes the native listening handle.
+    // Sockets already admitted by onSocket remain tracked until close().
+    this.pause(true)
   }
 
   /**
@@ -307,6 +313,7 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
       this.server.listen(netConfig, resolve)
     })
 
+    this.serverClosePromise = undefined
     this.status = { ...this.status, code: TCPListenerStatusCode.ACTIVE }
     this.log('listening on %s', this.server.address())
   }
@@ -339,6 +346,8 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
     // We need to set this status before closing server, so other procedures are aware
     // during the time the server is closing
     this.status = permanent ? { code: TCPListenerStatusCode.INACTIVE } : { ...this.status, code: TCPListenerStatusCode.PAUSED }
+
+    this.serverClosePromise = pEvent(this.server, 'close')
 
     // stop accepting incoming connections - existing connections are maintained
     // - any callback passed here would be invoked after existing connections

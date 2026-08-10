@@ -15,7 +15,7 @@ import { stubInterface } from 'sinon-ts'
 import { AddressManager } from '../../src/address-manager/index.ts'
 import { DefaultTransportManager } from '../../src/transport-manager.ts'
 import type { Components } from '../../src/components.ts'
-import type { Connection, Transport, Upgrader, Listener } from '@libp2p/interface'
+import type { Connection, Transport, Upgrader, Listener, ListenerEvents } from '@libp2p/interface'
 import type { Multiaddr } from '@multiformats/multiaddr'
 
 const listenAddr = multiaddr('/ip4/127.0.0.1/tcp/0')
@@ -67,6 +67,7 @@ describe('Transport Manager', () => {
             addr = a
           },
           getAddrs: () => addr != null ? [addr] : [],
+          stopAccepting: () => {},
           close: async () => {
             addr = undefined
             closeListeners.forEach(fn => {
@@ -184,7 +185,7 @@ describe('Transport Manager', () => {
       listenFilter: (addrs) => addrs,
       createListener: () => {
         return stubInterface<Listener>({
-          listen: async (ma) => {
+          listen: async (ma: Multiaddr) => {
             if (getNetConfig(ma).type === 'ip6') {
               throw new Error('Listen on IPv6 failed')
             }
@@ -209,6 +210,83 @@ describe('Transport Manager', () => {
     const connection = await tm.dial(addr)
     expect(connection).to.exist()
     await connection.close()
+  })
+
+  it('should preserve listener cleanup after stopping admission', async () => {
+    const calls: string[] = []
+    let listenerIndex = 0
+    const shutdownTransport = stubInterface<Transport>({
+      dial: async () => stubInterface<Connection>(),
+      dialFilter: (addrs) => addrs.filter(ma => ma.toString().startsWith('/memory')),
+      listenFilter: (addrs) => addrs.filter(ma => ma.toString().startsWith('/memory')),
+      createListener: () => {
+        const index = listenerIndex++
+        let addr: Multiaddr | undefined
+        const listener = Object.assign(new TypedEventEmitter<ListenerEvents>(), {
+          listen: async (ma: Multiaddr) => {
+            addr = ma
+          },
+          getAddrs: () => addr == null ? [] : [addr],
+          updateAnnounceAddrs: () => {},
+          stopAccepting: () => {
+            calls.push(`stopAccepting:${index}`)
+          },
+          close: async () => {
+            calls.push(`close:${index}`)
+            addr = undefined
+            listener.safeDispatchEvent('close')
+          }
+        })
+
+        return listener
+      }
+    })
+    shutdownTransport[Symbol.toStringTag] = 'shutdown-transport'
+    tm.add(shutdownTransport)
+    await tm.listen(addrs)
+
+    await tm.beforeStop()
+
+    expect(calls).to.deep.equal([
+      'stopAccepting:0',
+      'stopAccepting:1'
+    ])
+    await expect(tm.dial(addrs[0]))
+      .to.eventually.be.rejected()
+      .and.to.have.property('name', 'NotStartedError')
+
+    await tm.stop()
+
+    expect(calls).to.deep.equal([
+      'stopAccepting:0',
+      'stopAccepting:1',
+      'close:0',
+      'close:1'
+    ])
+  })
+
+  it('should close a listener created while shutdown starts', async () => {
+    const close = Sinon.stub().resolves()
+    const shutdownTransport = stubInterface<Transport>({
+      dialFilter: (addrs) => addrs,
+      listenFilter: (addrs) => addrs,
+      createListener: () => {
+        void tm.beforeStop()
+
+        return stubInterface<Listener>({
+          close
+        })
+      }
+    })
+    shutdownTransport[Symbol.toStringTag] = 'reentrant-shutdown-transport'
+    tm.add(shutdownTransport)
+
+    await expect(tm.listen([addrs[0]]))
+      .to.eventually.be.rejected()
+      .and.to.have.property('name', 'NotStartedError')
+
+    expect(close.calledOnce).to.be.true()
+    expect(tm.getListeners()).to.be.empty()
   })
 
   it('should remove listeners when they stop listening', async () => {

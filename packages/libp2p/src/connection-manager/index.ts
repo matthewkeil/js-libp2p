@@ -390,7 +390,22 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
   /**
    * Stops the Connection Manager
    */
+  async beforeStop (): Promise<void> {
+    if (!this.started) {
+      return
+    }
+
+    this.started = false
+
+    await stop(
+      this.reconnectQueue,
+      this.dialQueue
+    )
+  }
+
   async stop (): Promise<void> {
+    await this.beforeStop()
+
     this.events.removeEventListener('connection:open', this.onConnect)
     this.events.removeEventListener('connection:close', this.onDisconnect)
 
@@ -545,6 +560,10 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
       options.signal?.throwIfAborted()
       options?.onProgress?.(new CustomProgressEvent('connection:open', peerIdOrMultiaddr))
 
+      if (!this.started) {
+        throw new NotStartedError('Not started')
+      }
+
       const { peerId, multiaddrs } = getPeerAddress(peerIdOrMultiaddr)
 
       if (this.peerId.equals(peerId)) {
@@ -561,6 +580,10 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
           options.onProgress?.(new CustomProgressEvent('dial-queue:already-connected'))
           options.onProgress?.(new CustomProgressEvent('connection:opened', existingConnection))
 
+          if (!this.started) {
+            throw new NotStartedError('Not started')
+          }
+
           return existingConnection
         }
       }
@@ -569,6 +592,12 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
         ...options,
         priority: options.priority ?? DEFAULT_DIAL_PRIORITY
       })
+
+      if (!this.started) {
+        const err = new NotStartedError('Not started')
+        connection.abort(err)
+        throw err
+      }
 
       if (connection.status !== 'open') {
         throw new ConnectionClosedError('Remote closed connection during opening')
@@ -606,6 +635,10 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
 
       options.onProgress?.(new CustomProgressEvent('connection:opened', connection))
 
+      if (!this.started) {
+        throw new NotStartedError('Not started')
+      }
+
       return connection
     } finally {
       this.outboundPendingConnections--
@@ -636,6 +669,11 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
   }
 
   acceptIncomingConnection (maConn: MultiaddrConnection): boolean {
+    if (!this.started) {
+      this.log('connection from %a refused - connection manager is stopping', maConn.remoteAddr)
+      return false
+    }
+
     // check deny list
     const denyConnection = this.deny.some(ipNet => {
       if (isNetworkAddress(maConn.remoteAddr)) {
