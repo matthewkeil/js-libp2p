@@ -67,6 +67,7 @@ describe('Transport Manager', () => {
             addr = a
           },
           getAddrs: () => addr != null ? [addr] : [],
+          stopAccepting: () => {},
           close: async () => {
             addr = undefined
             closeListeners.forEach(fn => {
@@ -209,6 +210,27 @@ describe('Transport Manager', () => {
     const connection = await tm.dial(addr)
     expect(connection).to.exist()
     await connection.close()
+  })
+
+  it('should stop accepting connections before listener teardown', async () => {
+    tm.add(transport)
+    await tm.listen([addrs[0]])
+
+    const listener = tm.getListeners()[0]
+    const stopAccepting = Sinon.spy(listener, 'stopAccepting')
+    const close = Sinon.spy(listener, 'close')
+
+    await tm.beforeStop()
+
+    expect(stopAccepting.calledOnce).to.be.true()
+    expect(close.called).to.be.false()
+    await expect(tm.dial(addrs[0]))
+      .to.eventually.be.rejected()
+      .and.to.have.property('name', 'NotStartedError')
+
+    await tm.stop()
+
+    expect(close.calledOnce).to.be.true()
   })
 
   it('should remove listeners when they stop listening', async () => {

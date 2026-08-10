@@ -10,7 +10,17 @@ import type { TypedEventTarget } from 'main-event'
 
 export interface TransportManagerInit {
   faultTolerance?: FaultTolerance
+
+  /**
+   * How long to wait after connection draining finishes before transport
+   * teardown begins, in milliseconds. Set to `0` to disable the delay.
+   *
+   * @default 100
+   */
+  shutdownPostDrainTimeout?: number
 }
+
+export const DEFAULT_SHUTDOWN_POST_DRAIN_TIMEOUT = 100
 
 export interface DefaultTransportManagerComponents {
   metrics?: Metrics
@@ -38,6 +48,7 @@ export class DefaultTransportManager implements TransportManager, Startable {
   private readonly listeners: Map<string, Listener[]>
   private readonly faultTolerance: FaultTolerance
   private started: boolean
+  private shutdownPromise?: Promise<void>
 
   constructor (components: DefaultTransportManagerComponents, init: TransportManagerInit = {}) {
     this.log = components.logger.forComponent('libp2p:transports')
@@ -85,6 +96,7 @@ export class DefaultTransportManager implements TransportManager, Startable {
 
   start (): void {
     this.started = true
+    this.shutdownPromise = undefined
   }
 
   async afterStart (): Promise<void> {
@@ -94,10 +106,36 @@ export class DefaultTransportManager implements TransportManager, Startable {
     await this.listen(addrs)
   }
 
+  async beforeStop (): Promise<void> {
+    if (this.shutdownPromise != null) {
+      return this.shutdownPromise
+    }
+
+    if (!this.started) {
+      return
+    }
+
+    // Prevent new listeners and dials while existing transport work drains.
+    this.started = false
+
+    const tasks: Array<Promise<void>> = []
+
+    for (const listener of this.getListeners()) {
+      if (listener.stopAccepting != null) {
+        tasks.push(Promise.resolve(listener.stopAccepting()))
+      }
+    }
+
+    this.shutdownPromise = Promise.all(tasks).then(() => undefined)
+    await this.shutdownPromise
+  }
+
   /**
    * Stops all listeners
    */
   async stop (): Promise<void> {
+    await this.beforeStop()
+
     const tasks = []
     for (const [key, listeners] of this.listeners) {
       this.log('closing listeners for %s', key)
@@ -117,14 +155,16 @@ export class DefaultTransportManager implements TransportManager, Startable {
     for (const key of this.listeners.keys()) {
       this.listeners.set(key, [])
     }
-
-    this.started = false
   }
 
   /**
    * Dials the given Multiaddr over it's supported transport
    */
   async dial (ma: Multiaddr, options?: TransportManagerDialOptions): Promise<Connection> {
+    if (!this.isStarted()) {
+      throw new NotStartedError('Not started')
+    }
+
     const transport = this.dialTransportForMultiaddr(ma)
 
     if (transport == null) {
