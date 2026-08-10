@@ -142,6 +142,26 @@ describe('Connection Manager', () => {
       .to.be.false()
   })
 
+  it('should reject new connections before stopping', async () => {
+    connectionManager = new DefaultConnectionManager(components, defaultOptions)
+    await connectionManager.start()
+
+    const maConn = stubInterface<MultiaddrConnection>({
+      remoteAddr: multiaddr('/ip4/83.13.55.32/tcp/59283')
+    })
+    const reconnectQueueStop = sinon.spy(connectionManager.reconnectQueue, 'stop')
+    const dialQueueStop = sinon.spy(connectionManager.dialQueue, 'stop')
+
+    await connectionManager.beforeStop()
+
+    expect(connectionManager.acceptIncomingConnection(maConn)).to.be.false()
+    await expect(connectionManager.openConnection(maConn.remoteAddr))
+      .to.eventually.be.rejected()
+      .and.to.have.property('name', 'NotStartedError')
+    expect(reconnectQueueStop.calledOnce).to.be.true()
+    expect(dialQueueStop.calledOnce).to.be.true()
+  })
+
   it('should allow connections from allowlist multiaddrs (IPv6)', async () => {
     const remoteAddr = multiaddr('/ip6/2001:db8::1/tcp/59283')
     const connectionManager = new DefaultConnectionManager(components, {
