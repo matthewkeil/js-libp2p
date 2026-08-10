@@ -343,7 +343,13 @@ describe('dial', () => {
 
     await listener.listen(multiaddr('/ip4/127.0.0.1/tcp/0'))
     const address = listener.getAddrs()[0]
-    const socket = net.connect(getNetConfig(address))
+    const { host, port } = getNetConfig(address)
+
+    if (port == null) {
+      throw new Error('Expected TCP listen address')
+    }
+
+    const socket = net.connect({ host, port })
 
     await upgradeStarted.promise
     await listener.stopAccepting?.()
@@ -351,7 +357,7 @@ describe('dial', () => {
     expect(listener.getAddrs()).to.be.empty()
     expect(upgradeAborted).to.be.false()
 
-    const rejectedSocket = net.connect(getNetConfig(address))
+    const rejectedSocket = net.connect({ host, port })
     await pEvent(rejectedSocket, 'error')
 
     const closePromise = listener.close()

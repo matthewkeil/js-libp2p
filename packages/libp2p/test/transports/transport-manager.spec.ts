@@ -185,7 +185,7 @@ describe('Transport Manager', () => {
       listenFilter: (addrs) => addrs,
       createListener: () => {
         return stubInterface<Listener>({
-          listen: async (ma) => {
+          listen: async (ma: Multiaddr) => {
             if (getNetConfig(ma).type === 'ip6') {
               throw new Error('Listen on IPv6 failed')
             }
@@ -223,7 +223,7 @@ describe('Transport Manager', () => {
         const index = listenerIndex++
         let addr: Multiaddr | undefined
         const listener = Object.assign(new TypedEventEmitter<ListenerEvents>(), {
-          listen: async (ma) => {
+          listen: async (ma: Multiaddr) => {
             addr = ma
           },
           getAddrs: () => addr == null ? [] : [addr],
