@@ -34,6 +34,14 @@ export interface Listener extends TypedEventTarget<ListenerEvents> {
   getAddrs(): Multiaddr[]
 
   /**
+   * Stop accepting new inbound connections without closing existing connections.
+   *
+   * This is invoked before transport teardown to allow connections that have
+   * already been accepted by the operating system to be handled.
+   */
+  stopAccepting?(): void | Promise<void>
+
+  /**
    * Close listener
    *
    * @returns {Promise<void>}

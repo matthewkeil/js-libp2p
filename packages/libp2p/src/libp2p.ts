@@ -18,7 +18,7 @@ import { CompoundContentRouting } from './content-routing.ts'
 import { DefaultPeerRouting } from './peer-routing.ts'
 import { RandomWalk } from './random-walk.ts'
 import { Registrar } from './registrar.ts'
-import { DefaultTransportManager } from './transport-manager.ts'
+import { DEFAULT_SHUTDOWN_POST_DRAIN_TIMEOUT, DefaultTransportManager } from './transport-manager.ts'
 import { Upgrader } from './upgrader.ts'
 import { userAgent } from './user-agent.ts'
 import * as pkg from './version.ts'
@@ -39,6 +39,7 @@ export class Libp2p<T extends ServiceMap = ServiceMap> extends TypedEventEmitter
 
   public components: Components & T
   private readonly log: Logger
+  private readonly shutdownPostDrainTimeout: number
 
   // eslint-disable-next-line complexity
   constructor (init: Libp2pInit<T> & { peerId: PeerId }) {
@@ -65,6 +66,12 @@ export class Libp2p<T extends ServiceMap = ServiceMap> extends TypedEventEmitter
     this.peerId = init.peerId
     this.logger = init.logger ?? defaultLogger()
     this.log = this.logger.forComponent('libp2p')
+    this.shutdownPostDrainTimeout = init.transportManager?.shutdownPostDrainTimeout ?? DEFAULT_SHUTDOWN_POST_DRAIN_TIMEOUT
+
+    if (this.shutdownPostDrainTimeout < 0) {
+      throw new InvalidParametersError('shutdownPostDrainTimeout must be greater than or equal to 0')
+    }
+
     // @ts-expect-error {} may not be of type T
     this.services = {}
 
@@ -260,6 +267,13 @@ export class Libp2p<T extends ServiceMap = ServiceMap> extends TypedEventEmitter
     this.status = 'stopping'
 
     await this.components.beforeStop?.()
+
+    if (this.shutdownPostDrainTimeout > 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, this.shutdownPostDrainTimeout)
+      })
+    }
+
     await this.components.stop()
     await this.components.afterStop?.()
 

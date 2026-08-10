@@ -390,7 +390,24 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
   /**
    * Stops the Connection Manager
    */
+  async beforeStop (): Promise<void> {
+    if (!this.started) {
+      return
+    }
+
+    // Reject new inbound and outbound connections while active connections
+    // are allowed to drain before transport teardown.
+    this.started = false
+
+    await stop(
+      this.reconnectQueue,
+      this.dialQueue
+    )
+  }
+
   async stop (): Promise<void> {
+    await this.beforeStop()
+
     this.events.removeEventListener('connection:open', this.onConnect)
     this.events.removeEventListener('connection:close', this.onDisconnect)
 
@@ -636,6 +653,11 @@ export class DefaultConnectionManager implements ConnectionManager, Startable {
   }
 
   acceptIncomingConnection (maConn: MultiaddrConnection): boolean {
+    if (!this.started) {
+      this.log('connection from %a refused - connection manager is stopping', maConn.remoteAddr)
+      return false
+    }
+
     // check deny list
     const denyConnection = this.deny.some(ipNet => {
       if (isNetworkAddress(maConn.remoteAddr)) {

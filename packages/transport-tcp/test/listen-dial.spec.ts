@@ -320,4 +320,57 @@ describe('dial', () => {
     // should abort the upgrade
     await abortedUpgrade.promise
   })
+
+  it('should stop accepting connections without aborting active upgrades', async () => {
+    const upgradeStarted = pDefer()
+    const abortedUpgrade = pDefer()
+    let upgradeSignal: AbortSignal | undefined
+
+    const listener = transport.createListener({
+      upgrader: stubInterface<Upgrader>({
+        async upgradeInbound (maConn, opts) {
+          upgradeSignal = opts.signal
+          upgradeStarted.resolve()
+
+          opts.signal.addEventListener('abort', () => {
+            abortedUpgrade.resolve()
+          }, {
+            once: true
+          })
+
+          return new Promise(() => {})
+        },
+        async upgradeOutbound (maConn) {
+          return stubInterface<Connection>({
+            remoteAddr: maConn.remoteAddr
+          })
+        }
+      })
+    })
+
+    await listener.listen(multiaddr('/ip4/127.0.0.1/tcp/0'))
+
+    const listenAddr = listener.getAddrs()[0]
+    await transport.dial(listenAddr, {
+      upgrader,
+      signal: AbortSignal.timeout(5_000)
+    })
+    await upgradeStarted.promise
+
+    if (listener.stopAccepting == null) {
+      throw new Error('Listener does not support stopping accepts')
+    }
+
+    await listener.stopAccepting()
+
+    expect(upgradeSignal?.aborted).to.be.false()
+    expect(listener.getAddrs()).to.be.empty()
+    await expect(transport.dial(listenAddr, {
+      upgrader,
+      signal: AbortSignal.timeout(5_000)
+    })).to.eventually.be.rejected()
+
+    await listener.close()
+    await abortedUpgrade.promise
+  })
 })
