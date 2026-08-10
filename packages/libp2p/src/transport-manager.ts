@@ -38,11 +38,14 @@ export class DefaultTransportManager implements TransportManager, Startable {
   private readonly listeners: Map<string, Listener[]>
   private readonly faultTolerance: FaultTolerance
   private started: boolean
+  private shutdownListeners: Listener[]
+  private shutdownPromise?: Promise<void>
 
   constructor (components: DefaultTransportManagerComponents, init: TransportManagerInit = {}) {
     this.log = components.logger.forComponent('libp2p:transports')
     this.components = components
     this.started = false
+    this.shutdownListeners = []
     this.transports = trackedMap({
       name: 'libp2p_transport_manager_transports',
       metrics: this.components.metrics
@@ -85,6 +88,8 @@ export class DefaultTransportManager implements TransportManager, Startable {
 
   start (): void {
     this.started = true
+    this.shutdownListeners = []
+    this.shutdownPromise = undefined
   }
 
   async afterStart (): Promise<void> {
@@ -94,37 +99,54 @@ export class DefaultTransportManager implements TransportManager, Startable {
     await this.listen(addrs)
   }
 
+  async beforeStop (): Promise<void> {
+    if (this.shutdownPromise != null) {
+      return this.shutdownPromise
+    }
+
+    if (!this.started) {
+      return
+    }
+
+    this.started = false
+    this.shutdownListeners = this.getListeners()
+    this.shutdownPromise = Promise.all(this.shutdownListeners.map(async listener => {
+      await listener.stopAccepting?.()
+    })).then(() => undefined)
+
+    await this.shutdownPromise
+  }
+
   /**
    * Stops all listeners
    */
   async stop (): Promise<void> {
-    const tasks = []
-    for (const [key, listeners] of this.listeners) {
-      this.log('closing listeners for %s', key)
-      while (listeners.length > 0) {
-        const listener = listeners.pop()
+    await this.beforeStop()
 
-        if (listener == null) {
-          continue
-        }
+    const listeners = this.shutdownListeners.length > 0
+      ? this.shutdownListeners
+      : this.getListeners()
 
-        tasks.push(listener.close())
-      }
-    }
-
-    await Promise.all(tasks)
+    this.log('closing %d listeners', listeners.length)
+    await Promise.all(listeners.map(async listener => {
+      await listener.close()
+    }))
     this.log('all listeners closed')
+
     for (const key of this.listeners.keys()) {
       this.listeners.set(key, [])
     }
-
-    this.started = false
+    this.shutdownListeners = []
   }
 
   /**
    * Dials the given Multiaddr over it's supported transport
    */
   async dial (ma: Multiaddr, options?: TransportManagerDialOptions): Promise<Connection> {
+    if (!this.isStarted()) {
+      throw new NotStartedError('Not started')
+    }
+
     const transport = this.dialTransportForMultiaddr(ma)
 
     if (transport == null) {
@@ -132,6 +154,10 @@ export class DefaultTransportManager implements TransportManager, Startable {
     }
 
     options?.onProgress?.(new CustomProgressEvent<string>('transport-manager:selected-transport', transport[Symbol.toStringTag]))
+
+    if (!this.isStarted()) {
+      throw new NotStartedError('Not started')
+    }
 
     // @ts-expect-error the transport has a typed onProgress option but we
     // can't predict what transport implementation we selected so all we can
@@ -256,8 +282,9 @@ export class DefaultTransportManager implements TransportManager, Startable {
         listener.addEventListener('close', () => {
           const index = listeners.findIndex(l => l === listener)
 
-          // remove the listener
-          listeners.splice(index, 1)
+          if (index !== -1) {
+            listeners.splice(index, 1)
+          }
 
           this.components.events.safeDispatchEvent('transport:close', {
             detail: listener

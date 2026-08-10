@@ -1,3 +1,4 @@
+import net from 'node:net'
 import os from 'os'
 import path from 'path'
 import { defaultLogger } from '@libp2p/logger'
@@ -5,6 +6,7 @@ import { getNetConfig } from '@libp2p/utils'
 import { multiaddr } from '@multiformats/multiaddr'
 import { expect } from 'aegir/chai'
 import pDefer from 'p-defer'
+import { pEvent } from 'p-event'
 import Sinon from 'sinon'
 import { stubInterface } from 'sinon-ts'
 import { tcp } from '../src/index.ts'
@@ -319,5 +321,43 @@ describe('dial', () => {
 
     // should abort the upgrade
     await abortedUpgrade.promise
+  })
+
+  it('should stop accepting before aborting admitted inbound upgrades', async () => {
+    const upgradeStarted = pDefer<void>()
+    const abortedUpgrade = pDefer<void>()
+    let upgradeAborted = false
+    const listener = transport.createListener({
+      upgrader: stubInterface<Upgrader>({
+        async upgradeInbound (_maConn, options) {
+          upgradeStarted.resolve()
+          options?.signal?.addEventListener('abort', () => {
+            upgradeAborted = true
+            abortedUpgrade.resolve()
+          }, { once: true })
+
+          return new Promise(() => {})
+        }
+      })
+    })
+
+    await listener.listen(multiaddr('/ip4/127.0.0.1/tcp/0'))
+    const address = listener.getAddrs()[0]
+    const socket = net.connect(getNetConfig(address))
+
+    await upgradeStarted.promise
+    await listener.stopAccepting?.()
+
+    expect(listener.getAddrs()).to.be.empty()
+    expect(upgradeAborted).to.be.false()
+
+    const rejectedSocket = net.connect(getNetConfig(address))
+    await pEvent(rejectedSocket, 'error')
+
+    const closePromise = listener.close()
+    await abortedUpgrade.promise
+    await closePromise
+
+    socket.destroy()
   })
 })

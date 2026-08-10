@@ -1,5 +1,5 @@
 import net from 'node:net'
-import { AlreadyStartedError, InvalidParametersError, NotStartedError } from '@libp2p/interface'
+import { AlreadyStartedError, InvalidParametersError } from '@libp2p/interface'
 import { getThinWaistAddresses } from '@libp2p/utils'
 import { multiaddr } from '@multiformats/multiaddr'
 import { TypedEventEmitter, setMaxListeners } from 'main-event'
@@ -156,7 +156,7 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
 
     if (this.status.code !== TCPListenerStatusCode.ACTIVE) {
       socket.destroy()
-      throw new NotStartedError('Server is not listening yet')
+      return
     }
 
     let maConn: MultiaddrConnection
@@ -272,8 +272,7 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
       events.push(pEvent(this.server, 'close', options))
     }
 
-    // shut down the server socket, permanently
-    this.pause(true)
+    this.stopAccepting()
 
     // stop any in-progress connection upgrades
     this.shutdownController.abort()
@@ -288,6 +287,12 @@ export class TCPListener extends TypedEventEmitter<ListenerEvents> implements Li
     })
 
     await Promise.all(events)
+  }
+
+  stopAccepting (): void {
+    // Closing net.Server synchronously closes the native listening handle.
+    // Sockets already admitted by onSocket remain tracked until close().
+    this.pause(true)
   }
 
   /**
