@@ -1,13 +1,26 @@
 import { stop } from '@libp2p/interface'
 import { expect } from 'aegir/chai'
 import { pEvent } from 'p-event'
+import pWaitFor from 'p-wait-for'
 import sinon from 'sinon'
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string'
-import { GossipsubIDv12, GossipsubIDv11, GossipsubIDv10 } from '../src/constants.ts'
+import { GossipsubIDv13, GossipsubIDv12, GossipsubIDv11, GossipsubIDv10 } from '../src/constants.ts'
 import { RPC } from '../src/message/rpc.ts'
 import { OutboundStream } from '../src/stream.ts'
 import { connectPubsubNodes, createComponentsArray } from './utils/create-pubsub.ts'
+import type { GossipSub as GossipSubClass } from '../src/gossipsub.ts'
 import type { GossipSubAndComponents } from './utils/create-pubsub.ts'
+
+type WithExtensionInternals = Partial<GossipSubClass> & {
+  handleExtensions: (id: string, rpc: RPC, firstMessage: boolean, streamProtocol: string) => void
+  peerExtensions: Map<string, RPC.ControlExtensions>
+}
+
+const extensionsRpc = (): RPC => ({
+  subscriptions: [],
+  messages: [],
+  control: { ihave: [], iwant: [], graft: [], prune: [], idontwant: [], extensions: { testExtension: true } }
+})
 
 const emptyRpc = (): RPC => ({ subscriptions: [], messages: [] })
 const emptyControl = (): RPC.ControlMessage => ({ ihave: [], iwant: [], graft: [], prune: [], idontwant: [] })
@@ -181,5 +194,91 @@ describe('extensions handshake - sending', () => {
         expect(rpc.control?.extensions).to.be.undefined()
       }
     }
+  })
+})
+
+describe('extensions handshake - receiving', () => {
+  let nodes: GossipSubAndComponents[]
+
+  beforeEach(() => {
+    nodes = []
+  })
+
+  afterEach(async () => {
+    sinon.restore()
+    await stop(...nodes.reduce<any[]>((acc, curr) => acc.concat(curr.pubsub, ...Object.entries(curr.components)), []))
+  })
+
+  it('should record extensions advertised in the first message on the stream', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true }
+    })
+    const [nodeA, nodeB] = nodes
+    const nodeAId = nodeA.components.peerId.toString()
+    const nodeBId = nodeB.components.peerId.toString()
+
+    await connectPubsubNodes(nodeA, nodeB)
+
+    // both sides learn each other's extensions from the hello
+    const pubsubA = nodeA.pubsub as unknown as WithExtensionInternals
+    const pubsubB = nodeB.pubsub as unknown as WithExtensionInternals
+    await pWaitFor(() => pubsubA.peerExtensions.get(nodeBId)?.testExtension === true)
+    await pWaitFor(() => pubsubB.peerExtensions.get(nodeAId)?.testExtension === true)
+  })
+
+  it('should read peers that advertise nothing as supporting no extensions', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({ number: 2, connected: false })
+    const [nodeA, nodeB] = nodes
+
+    await connectPubsubNodes(nodeA, nodeB)
+    const topic = 'Z'
+    const subscriptionPromises = nodes.map(async (n) => pEvent(n.pubsub, 'subscription-change'))
+    nodes.forEach((n) => { n.pubsub.subscribe(topic) })
+    await Promise.all(subscriptionPromises)
+
+    const pubsubA = nodeA.pubsub as unknown as WithExtensionInternals
+    expect(pubsubA.peerExtensions.size).to.equal(0)
+  })
+
+  it('should ignore extensions that are not in the first message on the stream', async () => {
+    nodes = await createComponentsArray({ number: 1, connected: false })
+    const pubsub = nodes[0].pubsub as unknown as WithExtensionInternals
+
+    pubsub.handleExtensions('peer-a', extensionsRpc(), false, GossipsubIDv13)
+    expect(pubsub.peerExtensions.has('peer-a'), 'late extensions must be ignored').to.be.false()
+  })
+
+  it('should ignore extensions on streams below v1.3', async () => {
+    nodes = await createComponentsArray({ number: 1, connected: false })
+    const pubsub = nodes[0].pubsub as unknown as WithExtensionInternals
+
+    pubsub.handleExtensions('peer-a', extensionsRpc(), true, GossipsubIDv12)
+    expect(pubsub.peerExtensions.has('peer-a'), 'extensions below v1.3 must be ignored').to.be.false()
+
+    // control: same message on a v1.3 stream is recorded
+    pubsub.handleExtensions('peer-a', extensionsRpc(), true, GossipsubIDv13)
+    expect(pubsub.peerExtensions.get('peer-a')?.testExtension).to.be.true()
+  })
+
+  it('should drop recorded extensions when the peer disconnects', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true }
+    })
+    const [nodeA, nodeB] = nodes
+    const nodeBId = nodeB.components.peerId.toString()
+
+    await connectPubsubNodes(nodeA, nodeB)
+    const pubsubA = nodeA.pubsub as unknown as WithExtensionInternals
+    await pWaitFor(() => pubsubA.peerExtensions.get(nodeBId)?.testExtension === true)
+
+    await nodeA.components.connectionManager.closeConnections(nodeB.components.peerId)
+    expect(pubsubA.peerExtensions.has(nodeBId), 'extensions must be dropped on disconnect').to.be.false()
   })
 })
