@@ -6,6 +6,7 @@ export interface RPC {
   subscriptions: RPC.SubOpts[]
   messages: RPC.Message[]
   control?: RPC.ControlMessage
+  testExtension?: RPC.TestExtension
 }
 
 export namespace RPC {
@@ -323,6 +324,7 @@ export namespace RPC {
     graft: RPC.ControlGraft[]
     prune: RPC.ControlPrune[]
     idontwant: RPC.ControlIDontWant[]
+    extensions?: RPC.ControlExtensions
   }
 
   export namespace ControlMessage {
@@ -368,6 +370,11 @@ export namespace RPC {
               w.uint32(42)
               RPC.ControlIDontWant.codec().encode(value, w)
             }
+          }
+
+          if (obj.extensions != null) {
+            w.uint32(50)
+            RPC.ControlExtensions.codec().encode(obj.extensions, w)
           }
 
           if (opts.lengthDelimited !== false) {
@@ -436,6 +443,12 @@ export namespace RPC {
                 obj.idontwant.push(RPC.ControlIDontWant.codec().decode(reader, reader.uint32(), {
                   limits: opts.limits?.idontwant$
                 }))
+                break
+              }
+              case 6: {
+                obj.extensions = RPC.ControlExtensions.codec().decode(reader, reader.uint32(), {
+                  limits: opts.limits?.extensions
+                })
                 break
               }
               default: {
@@ -551,6 +564,13 @@ export namespace RPC {
 
                 break
               }
+              case 6: {
+                yield * RPC.ControlExtensions.codec().stream(reader, reader.uint32(), `${prefix}.extensions`, {
+                  limits: opts.limits?.extensions
+                })
+
+                break
+              }
               default: {
                 reader.skipType(tag & 7)
                 break
@@ -611,6 +631,11 @@ export namespace RPC {
       index: number
     }
 
+    export interface ControlMessageExtensionsTestExtensionFieldEvent {
+      field: '$.extensions.testExtension'
+      value: boolean
+    }
+
     export interface ControlMessageIdontwantMessageIDsFieldEvent {
       field: '$.idontwant[].messageIDs[]'
       index: number
@@ -625,7 +650,7 @@ export namespace RPC {
       return decodeMessage(buf, ControlMessage.codec(), opts)
     }
 
-    export function stream (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<ControlMessage>): Generator<ControlMessageIhaveTopicIDFieldEvent | ControlMessageIhaveMessageIDsFieldEvent | ControlMessageIwantMessageIDsFieldEvent | ControlMessageGraftTopicIDFieldEvent | ControlMessagePruneTopicIDFieldEvent | ControlMessagePrunePeersPeerIDFieldEvent | ControlMessagePrunePeersSignedPeerRecordFieldEvent | ControlMessagePruneBackoffFieldEvent | ControlMessageIdontwantMessageIDsFieldEvent> {
+    export function stream (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<ControlMessage>): Generator<ControlMessageIhaveTopicIDFieldEvent | ControlMessageIhaveMessageIDsFieldEvent | ControlMessageIwantMessageIDsFieldEvent | ControlMessageGraftTopicIDFieldEvent | ControlMessagePruneTopicIDFieldEvent | ControlMessagePrunePeersPeerIDFieldEvent | ControlMessagePrunePeersSignedPeerRecordFieldEvent | ControlMessagePruneBackoffFieldEvent | ControlMessageIdontwantMessageIDsFieldEvent | ControlMessageExtensionsTestExtensionFieldEvent> {
       return streamMessage(buf, ControlMessage.codec(), opts)
     }
   }
@@ -1335,6 +1360,158 @@ export namespace RPC {
     }
   }
 
+  export interface ControlExtensions {
+    testExtension?: boolean
+  }
+
+  export namespace ControlExtensions {
+    let _codec: Codec<ControlExtensions>
+
+    export const codec = (): Codec<ControlExtensions> => {
+      if (_codec == null) {
+        _codec = message<ControlExtensions>((obj, w, opts = {}) => {
+          if (opts.lengthDelimited !== false) {
+            w.fork()
+          }
+
+          if (obj.testExtension != null) {
+            w.uint32(51939472)
+            w.bool(obj.testExtension)
+          }
+
+          if (opts.lengthDelimited !== false) {
+            w.ldelim()
+          }
+        }, (reader, length, opts = {}) => {
+          const obj: any = {}
+
+          const end = length == null ? reader.len : reader.pos + length
+
+          while (reader.pos < end) {
+            const tag = reader.uint32()
+
+            switch (tag >>> 3) {
+              case 6492434: {
+                obj.testExtension = reader.bool()
+                break
+              }
+              default: {
+                reader.skipType(tag & 7)
+                break
+              }
+            }
+          }
+
+          return obj
+        }, function * (reader, length, prefix, opts = {}) {
+          const end = length == null ? reader.len : reader.pos + length
+
+          while (reader.pos < end) {
+            const tag = reader.uint32()
+
+            switch (tag >>> 3) {
+              case 6492434: {
+                yield {
+                  field: `${prefix}.testExtension`,
+                  value: reader.bool()
+                }
+                break
+              }
+              default: {
+                reader.skipType(tag & 7)
+                break
+              }
+            }
+          }
+        })
+      }
+
+      return _codec
+    }
+
+    export interface ControlExtensionsTestExtensionFieldEvent {
+      field: '$.testExtension'
+      value: boolean
+    }
+
+    export function encode (obj: Partial<ControlExtensions>): Uint8Array {
+      return encodeMessage(obj, ControlExtensions.codec())
+    }
+
+    export function decode (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<ControlExtensions>): ControlExtensions {
+      return decodeMessage(buf, ControlExtensions.codec(), opts)
+    }
+
+    export function stream (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<ControlExtensions>): Generator<ControlExtensionsTestExtensionFieldEvent> {
+      return streamMessage(buf, ControlExtensions.codec(), opts)
+    }
+  }
+
+  export interface TestExtension {}
+
+  export namespace TestExtension {
+    let _codec: Codec<TestExtension>
+
+    export const codec = (): Codec<TestExtension> => {
+      if (_codec == null) {
+        _codec = message<TestExtension>((obj, w, opts = {}) => {
+          if (opts.lengthDelimited !== false) {
+            w.fork()
+          }
+
+          if (opts.lengthDelimited !== false) {
+            w.ldelim()
+          }
+        }, (reader, length, opts = {}) => {
+          const obj: any = {}
+
+          const end = length == null ? reader.len : reader.pos + length
+
+          while (reader.pos < end) {
+            const tag = reader.uint32()
+
+            switch (tag >>> 3) {
+              default: {
+                reader.skipType(tag & 7)
+                break
+              }
+            }
+          }
+
+          return obj
+          // eslint-disable-next-line require-yield
+        }, function * (reader, length, prefix, opts = {}) {
+          const end = length == null ? reader.len : reader.pos + length
+
+          while (reader.pos < end) {
+            const tag = reader.uint32()
+
+            switch (tag >>> 3) {
+              default: {
+                reader.skipType(tag & 7)
+                break
+              }
+            }
+          }
+        })
+      }
+
+      return _codec
+    }
+
+    export function encode (obj: Partial<TestExtension>): Uint8Array {
+      return encodeMessage(obj, TestExtension.codec())
+    }
+
+    export function decode (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<TestExtension>): TestExtension {
+      return decodeMessage(buf, TestExtension.codec(), opts)
+    }
+
+    export function stream (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<TestExtension>): Generator<never> {
+      return streamMessage(buf, TestExtension.codec(), opts) as Generator<never>
+    }
+  }
+
   let _codec: Codec<RPC>
 
   export const codec = (): Codec<RPC> => {
@@ -1361,6 +1538,11 @@ export namespace RPC {
         if (obj.control != null) {
           w.uint32(26)
           RPC.ControlMessage.codec().encode(obj.control, w)
+        }
+
+        if (obj.testExtension != null) {
+          w.uint32(51939474)
+          RPC.TestExtension.codec().encode(obj.testExtension, w)
         }
 
         if (opts.lengthDelimited !== false) {
@@ -1401,6 +1583,12 @@ export namespace RPC {
             case 3: {
               obj.control = RPC.ControlMessage.codec().decode(reader, reader.uint32(), {
                 limits: opts.limits?.control
+              })
+              break
+            }
+            case 6492434: {
+              obj.testExtension = RPC.TestExtension.codec().decode(reader, reader.uint32(), {
+                limits: opts.limits?.testExtension
               })
               break
             }
@@ -1463,6 +1651,13 @@ export namespace RPC {
             case 3: {
               yield * RPC.ControlMessage.codec().stream(reader, reader.uint32(), `${prefix}.control`, {
                 limits: opts.limits?.control
+              })
+
+              break
+            }
+            case 6492434: {
+              yield * RPC.TestExtension.codec().stream(reader, reader.uint32(), `${prefix}.testExtension`, {
+                limits: opts.limits?.testExtension
               })
 
               break
@@ -1581,6 +1776,11 @@ export namespace RPC {
     value: Uint8Array
   }
 
+  export interface RPCControlExtensionsTestExtensionFieldEvent {
+    field: '$.control.extensions.testExtension'
+    value: boolean
+  }
+
   export function encode (obj: Partial<RPC>): Uint8Array {
     return encodeMessage(obj, RPC.codec())
   }
@@ -1589,7 +1789,7 @@ export namespace RPC {
     return decodeMessage(buf, RPC.codec(), opts)
   }
 
-  export function stream (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<RPC>): Generator<RPCSubscriptionsSubscribeFieldEvent | RPCSubscriptionsTopicFieldEvent | RPCMessagesFromFieldEvent | RPCMessagesDataFieldEvent | RPCMessagesSeqnoFieldEvent | RPCMessagesTopicFieldEvent | RPCMessagesSignatureFieldEvent | RPCMessagesKeyFieldEvent | RPCControlIhaveTopicIDFieldEvent | RPCControlIhaveMessageIDsFieldEvent | RPCControlIwantMessageIDsFieldEvent | RPCControlGraftTopicIDFieldEvent | RPCControlPruneTopicIDFieldEvent | RPCControlPrunePeersPeerIDFieldEvent | RPCControlPrunePeersSignedPeerRecordFieldEvent | RPCControlPruneBackoffFieldEvent | RPCControlIdontwantMessageIDsFieldEvent> {
+  export function stream (buf: Uint8Array | Uint8ArrayList, opts?: DecodeOptions<RPC>): Generator<RPCSubscriptionsSubscribeFieldEvent | RPCSubscriptionsTopicFieldEvent | RPCMessagesFromFieldEvent | RPCMessagesDataFieldEvent | RPCMessagesSeqnoFieldEvent | RPCMessagesTopicFieldEvent | RPCMessagesSignatureFieldEvent | RPCMessagesKeyFieldEvent | RPCControlIhaveTopicIDFieldEvent | RPCControlIhaveMessageIDsFieldEvent | RPCControlIwantMessageIDsFieldEvent | RPCControlGraftTopicIDFieldEvent | RPCControlPruneTopicIDFieldEvent | RPCControlPrunePeersPeerIDFieldEvent | RPCControlPrunePeersSignedPeerRecordFieldEvent | RPCControlPruneBackoffFieldEvent | RPCControlIdontwantMessageIDsFieldEvent | RPCControlExtensionsTestExtensionFieldEvent> {
     return streamMessage(buf, RPC.codec(), opts)
   }
 }
