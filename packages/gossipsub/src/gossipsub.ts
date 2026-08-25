@@ -264,6 +264,12 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
   private readonly peerExtensions = new Map<PeerIdStr, RPC.ControlExtensions>()
 
   /**
+   * Peers we already sent a TestExtension message to for their current extensions
+   * advertisement - reset together with `peerExtensions`
+   */
+  private readonly testExtensionSent = new Set<PeerIdStr>()
+
+  /**
    * Tracks IDONTWANT messages received by peers and the heartbeat they were received in.
    * Message sends in the forward (per the v1.2 spec) and IWANT response paths are
    * skipped for peers with an entry here.
@@ -631,6 +637,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     this.idontwantCounts.clear()
     this.idontwants.clear()
     this.peerExtensions.clear()
+    this.testExtensionSent.clear()
 
     this.log('stopped')
   }
@@ -776,6 +783,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     // gossipsub v1.3: peer extensions always reflect the newest inbound stream's first
     // message - a peer that opens a new stream and stays silent reads as "none"
     this.peerExtensions.delete(id)
+    this.testExtensionSent.delete(id)
 
     this.pipePeerReadStream(peerId, inboundStream.source, inboundStream.protocol).catch((err) => { this.log(err) })
   }
@@ -868,6 +876,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     this.idontwants.delete(id)
     // Remove advertised extensions
     this.peerExtensions.delete(id)
+    this.testExtensionSent.delete(id)
 
     // Remove from peer scoring
     this.score.removePeer(id)
@@ -1018,6 +1027,13 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     this.log(
       `rpc.from ${from.toString()} subscriptions ${subscriptions} messages ${messages} ihave ${ihave} iwant ${iwant} graft ${graft} prune ${prune}`
     )
+
+    // gossipsub v1.3: the TestExtension message carries no behavior beyond proving
+    // that the extension exchange works across implementations
+    if (rpc.testExtension != null) {
+      this.log('received TestExtension message from %p', from)
+      this.metrics?.onTestExtensionReceived()
+    }
 
     // Handle received subscriptions
     if ((rpc.subscriptions != null) && rpc.subscriptions.length > 0) {
@@ -1759,6 +1775,15 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     this.log('peer %s advertised extensions', id)
     this.peerExtensions.set(id, extensions)
     this.metrics?.onExtensionsReceived()
+
+    // test-extension spec: if both peers support the TestExtension, each peer MUST
+    // send a TestExtension message
+    if (this.ourExtensions?.testExtension === true && extensions.testExtension === true && !this.testExtensionSent.has(id)) {
+      this.testExtensionSent.add(id)
+      this.log('sending TestExtension message to %s', id)
+      this.metrics?.onTestExtensionSent()
+      this.sendRpc(id, { subscriptions: [], messages: [], testExtension: {} })
+    }
   }
 
   /**
