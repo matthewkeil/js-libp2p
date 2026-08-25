@@ -264,7 +264,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
 
   private directPeerInitial: ReturnType<typeof setTimeout> | null = null
 
-  public static multicodec: string = constants.GossipsubIDv12
+  public static multicodec: string = constants.GossipsubIDv13
 
   // Options
   readonly opts: Required<GossipOptions>
