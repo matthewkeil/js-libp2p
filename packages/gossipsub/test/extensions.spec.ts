@@ -1,5 +1,7 @@
 import { stop } from '@libp2p/interface'
+import { multiaddr } from '@multiformats/multiaddr'
 import { expect } from 'aegir/chai'
+import { encode } from 'it-length-prefixed'
 import { pEvent } from 'p-event'
 import pWaitFor from 'p-wait-for'
 import sinon from 'sinon'
@@ -10,6 +12,7 @@ import { OutboundStream } from '../src/stream.ts'
 import { connectPubsubNodes, createComponentsArray } from './utils/create-pubsub.ts'
 import type { GossipSub as GossipSubClass } from '../src/gossipsub.ts'
 import type { GossipSubAndComponents } from './utils/create-pubsub.ts'
+import type { Connection } from '@libp2p/interface'
 
 type WithExtensionInternals = Partial<GossipSubClass> & {
   handleExtensions: (id: string, rpc: RPC, firstMessage: boolean, streamProtocol: string) => void
@@ -73,6 +76,34 @@ describe('extensions wire format', () => {
     const testExtensionFixture = uint8ArrayFromString('9291e21800', 'base16')
     expect(RPC.encode({ ...emptyRpc(), testExtension: {} })).to.equalBytes(testExtensionFixture)
     expect(RPC.decode(testExtensionFixture).testExtension).to.not.be.undefined()
+  })
+
+  it('should decode extensions under the bounded decode limits', () => {
+    // mirrors the limits shape used by GossipSub.decodeRpc
+    const limits = {
+      subscriptions: 5000,
+      messages: 5000,
+      control: {
+        ihave: 5000,
+        ihave$: { messageIDs: 5000 },
+        iwant: 5000,
+        iwant$: { messageIDs: 5000 },
+        graft: 5000,
+        prune: 5000,
+        prune$: { peers: 16 },
+        idontwant: 5000,
+        idontwant$: { messageIDs: 512 }
+      }
+    }
+
+    const rpc: RPC = {
+      ...emptyRpc(),
+      control: { ...emptyControl(), extensions: { testExtension: true } },
+      testExtension: {}
+    }
+    const decoded = RPC.decode(RPC.encode(rpc), { limits })
+    expect(decoded.control?.extensions?.testExtension).to.be.true()
+    expect(decoded.testExtension).to.not.be.undefined()
   })
 
   it('should ignore unknown extension fields on decode', () => {
@@ -341,5 +372,102 @@ describe('extensions handshake - receiving', () => {
 
     await nodeA.components.connectionManager.closeConnections(nodeB.components.peerId)
     expect(pubsubA.peerExtensions.has(nodeBId), 'extensions must be dropped on disconnect').to.be.false()
+  })
+
+  it('should re-record extensions when the peer re-advertises on a new stream', async function () {
+    this.timeout(10e4)
+    const pushSpy = sinon.spy(OutboundStream.prototype, 'push')
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true }
+    })
+    const [nodeA, nodeB] = nodes
+    const nodeBId = nodeB.components.peerId.toString()
+
+    await connectPubsubNodes(nodeA, nodeB)
+    const pubsubA = nodeA.pubsub as unknown as WithExtensionInternals
+    await pWaitFor(() => pubsubA.peerExtensions.get(nodeBId)?.testExtension === true, { timeout: 5000 })
+
+    // simulate B opening a replacement inbound stream to A whose first message
+    // re-advertises B's extensions. Streams are message-event based - a bare
+    // EventTarget with the stream fields the pipeline touches is enough
+    const frame = encode.single(RPC.encode(extensionsRpc()))
+    const fakeStream: any = new EventTarget()
+    fakeStream.protocol = GossipsubIDv13
+    fakeStream.close = async (): Promise<void> => {}
+    fakeStream.abort = (): void => {}
+
+    const fakeConnection = {
+      remotePeer: nodeB.components.peerId,
+      direction: 'inbound',
+      remoteAddr: multiaddr('/memory/9999'),
+      status: 'open'
+    } as unknown as Connection
+
+    const handleCall = nodeA.components.registrar.handle.getCalls().find((call) => call.args[0] === GossipsubIDv13)
+    if (handleCall == null) {
+      throw new Error('no v1.3 stream handler registered')
+    }
+    handleCall.args[1](fakeStream, fakeConnection)
+
+    // the replacement stream reset the recorded extensions synchronously
+    expect(pubsubA.peerExtensions.has(nodeBId), 'replacement must reset recorded extensions').to.be.false()
+
+    // deliver the first message on the replacement stream
+    const messageEvent: any = new Event('message')
+    messageEvent.data = frame
+    fakeStream.dispatchEvent(messageEvent)
+    fakeStream.dispatchEvent(new Event('remoteCloseWrite'))
+
+    // and the re-advertisement in its first message is recorded again
+    await pWaitFor(() => pubsubA.peerExtensions.get(nodeBId)?.testExtension === true, { timeout: 5000 })
+
+    // the handshake state was reset, so A answers the new advertisement with a
+    // second TestExtension message (one each from the initial exchange, then one more)
+    await pWaitFor(() => {
+      const testExtensionRpcs = pushSpy.getCalls()
+        .map((call) => RPC.decode(call.args[0]))
+        .filter((rpc) => rpc.testExtension != null)
+      return testExtensionRpcs.length >= 3
+    }, { timeout: 5000 })
+  })
+})
+
+describe('extensions version interop', () => {
+  let nodes: GossipSubAndComponents[]
+
+  afterEach(async () => {
+    sinon.restore()
+    await stop(...nodes.reduce<any[]>((acc, curr) => acc.concat(curr.pubsub, ...Object.entries(curr.components)), []))
+  })
+
+  it('should exchange messages between v1.3 and v1.2 peers', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true, allowPublishToZeroTopicPeers: true }
+    })
+    const [nodeA, nodeB] = nodes
+    // B tops out at v1.2
+    nodeB.pubsub.protocols = [GossipsubIDv12, GossipsubIDv11, GossipsubIDv10]
+
+    const topic = 'Z'
+    const subscriptionPromises = nodes.map(async (n) => pEvent(n.pubsub, 'subscription-change'))
+    nodes.forEach((n) => { n.pubsub.subscribe(topic) })
+    await connectPubsubNodes(nodeA, nodeB)
+    await Promise.all(subscriptionPromises)
+    await Promise.all(nodes.map(async (n) => pEvent(n.pubsub, 'gossipsub:heartbeat')))
+
+    const received = pEvent<'gossipsub:message', CustomEvent>(nodeB.pubsub, 'gossipsub:message')
+    await nodeA.pubsub.publish(topic, uint8ArrayFromString('interop message'))
+    await received
+
+    // no extensions were recorded on either side
+    const pubsubA = nodeA.pubsub as unknown as WithExtensionInternals
+    const pubsubB = nodeB.pubsub as unknown as WithExtensionInternals
+    expect(pubsubA.peerExtensions.size).to.equal(0)
+    expect(pubsubB.peerExtensions.size).to.equal(0)
   })
 })
