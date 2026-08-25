@@ -91,7 +91,7 @@ export interface TopicValidatorFn {
   (peer: PeerId, message: Message): TopicValidatorResult | Promise<TopicValidatorResult>
 }
 
-export const multicodec: string = constants.GossipsubIDv12
+export const multicodec: string = constants.GossipsubIDv13
 
 export interface GossipsubOpts extends GossipsubOptsSpec {
   /** if dial should fallback to floodsub */
@@ -213,6 +213,17 @@ export interface GossipsubOpts extends GossipsubOptsSpec {
    * Limits to bound protobuf decoding
    */
   decodeRpcLimits?: DecodeRPCLimits
+
+  /**
+   * Advertise the experimental TestExtension in the gossipsub v1.3 Extensions
+   * control message and exchange TestExtension messages with peers that also
+   * advertise it. This extension exists purely to test extension interoperability
+   * across implementations - never enable it in production.
+   *
+   * @internal
+   * @default false
+   */
+  testExtension: boolean
 
   /**
    * If true, will utilize the libp2p connection manager tagging system to prune/graft connections to peers, defaults to true

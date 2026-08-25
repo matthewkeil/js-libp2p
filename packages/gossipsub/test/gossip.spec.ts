@@ -10,7 +10,7 @@ import sinon from 'sinon'
 import { stubInterface } from 'sinon-ts'
 import { concat, equals as uint8ArrayEquals } from 'uint8arrays'
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string'
-import { FloodsubID, GossipsubDhi, GossipsubFeature, GossipsubIDv10, GossipsubIDv11, GossipsubIDv12, GossipsubVersionLadder, protocolSupportsFeature } from '../src/constants.ts'
+import { FloodsubID, GossipsubDhi, GossipsubFeature, GossipsubIDv10, GossipsubIDv11, GossipsubIDv12, GossipsubIDv13, GossipsubVersionLadder, protocolSupportsFeature } from '../src/constants.ts'
 import { GossipSub as GossipSubClass } from '../src/gossipsub.ts'
 import { TopicValidatorResult } from '../src/index.ts'
 import { messageIdToString } from '../src/utils/messageIdToString.ts'
@@ -224,6 +224,10 @@ describe('gossip', () => {
     // this node only speaks gossipsub v1.1 and so must never receive IDONTWANT
     const legacyNode = nodes[1]
     legacyNode.pubsub.protocols = [GossipsubIDv11, GossipsubIDv10]
+    // this node tops out at v1.2, all other nodes negotiate v1.3 - both must
+    // receive IDONTWANT (regression: the gate must not be an equality check)
+    const v12Node = nodes[2]
+    v12Node.pubsub.protocols = [GossipsubIDv12, GossipsubIDv11, GossipsubIDv10]
 
     const topic = 'Z'
     const subscriptionPromises = nodes.map(async (n) => pEvent(n.pubsub, 'subscription-change'))
@@ -239,10 +243,11 @@ describe('gossip', () => {
     // wait for the message and the resulting IDONTWANTs to propagate
     await Promise.all(nodes.slice(1).map(async (n) => pEvent(n.pubsub, 'gossipsub:heartbeat')))
 
-    // v1.2 receivers exchanged IDONTWANTs with each other, the v1.1 peer got none
+    // capable receivers exchanged IDONTWANTs with each other, the v1.1 peer got none
     expect(legacyNode.pubsub['idontwants'].size, 'v1.1 peer should not receive IDONTWANT').to.equal(0)
-    const v12PeersWithIdontwants = nodes.slice(2).filter((n) => n.pubsub['idontwants'].size > 0)
-    expect(v12PeersWithIdontwants, 'v1.2 peers should receive IDONTWANT').to.have.length.greaterThan(0)
+    expect(v12Node.pubsub['idontwants'].size, 'v1.2 peer should receive IDONTWANT').to.be.greaterThan(0)
+    const v13PeersWithIdontwants = nodes.slice(3).filter((n) => n.pubsub['idontwants'].size > 0)
+    expect(v13PeersWithIdontwants, 'v1.3 peers should receive IDONTWANT').to.have.length.greaterThan(0)
   })
 
   it('should not forward messages to peers that sent IDONTWANT', async function () {
@@ -919,6 +924,17 @@ describe('protocolSupportsFeature', () => {
     // every ladder entry from v1.1 onward supports backoff, including versions appended later
     for (const protocol of GossipsubVersionLadder.slice(GossipsubVersionLadder.indexOf(GossipsubIDv11))) {
       expect(protocolSupportsFeature(protocol, GossipsubFeature.Backoff), protocol).to.be.true()
+    }
+  })
+
+  it('should support the Extensions control message from gossipsub v1.3 onward', () => {
+    expect(protocolSupportsFeature(GossipsubIDv10, GossipsubFeature.Extensions)).to.be.false()
+    expect(protocolSupportsFeature(GossipsubIDv11, GossipsubFeature.Extensions)).to.be.false()
+    expect(protocolSupportsFeature(GossipsubIDv12, GossipsubFeature.Extensions)).to.be.false()
+
+    // every ladder entry from v1.3 onward supports extensions, including versions appended later
+    for (const protocol of GossipsubVersionLadder.slice(GossipsubVersionLadder.indexOf(GossipsubIDv13))) {
+      expect(protocolSupportsFeature(protocol, GossipsubFeature.Extensions), protocol).to.be.true()
     }
   })
 

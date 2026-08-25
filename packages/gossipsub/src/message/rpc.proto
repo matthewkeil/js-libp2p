@@ -1,9 +1,18 @@
 syntax = "proto3";
 
+// Extension-related fields and messages mirror the gossipsub extension registry:
+// https://github.com/libp2p/specs/blob/master/pubsub/gossipsub/extensions/extensions.proto
+// Registry fields for extensions this implementation does not support yet are
+// intentionally left undefined - protobuf decoding drops unknown fields, so this is
+// wire-safe. Each extension adds its own fields when it is implemented.
 message RPC {
   repeated SubOpts subscriptions = 1;
   repeated Message messages = 2;
   optional ControlMessage control = 3;
+
+  // Experimental extensions must use field numbers larger than 0x200000 to be
+  // encoded with at least 4 bytes
+  optional TestExtension testExtension = 6492434;
 
   message SubOpts {
     optional bool subscribe = 1; // subscribe or unsubcribe
@@ -25,7 +34,16 @@ message RPC {
     repeated ControlGraft graft = 3;
     repeated ControlPrune prune = 4;
     repeated ControlIDontWant idontwant = 5;
+    optional ControlExtensions extensions = 6;
   }
+
+  message ControlExtensions {
+    // Experimental extensions must use field numbers larger than 0x200000 to be
+    // encoded with at least 4 bytes
+    optional bool testExtension = 6492434;
+  }
+
+  message TestExtension {}
 
   message ControlIHave {
     optional string topicID = 1;
