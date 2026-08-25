@@ -264,6 +264,67 @@ describe('extensions handshake - receiving', () => {
     expect(pubsub.peerExtensions.get('peer-a')?.testExtension).to.be.true()
   })
 
+  it('should exchange TestExtension messages when both peers support it', async function () {
+    this.timeout(10e4)
+    const pushSpy = sinon.spy(OutboundStream.prototype, 'push')
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true }
+    })
+    const [nodeA, nodeB] = nodes
+    const nodeAId = nodeA.components.peerId.toString()
+    const nodeBId = nodeB.components.peerId.toString()
+
+    await connectPubsubNodes(nodeA, nodeB)
+
+    const pubsubA = nodeA.pubsub as unknown as WithExtensionInternals
+    const pubsubB = nodeB.pubsub as unknown as WithExtensionInternals
+    await pWaitFor(() => pubsubA.peerExtensions.get(nodeBId)?.testExtension === true)
+    await pWaitFor(() => pubsubB.peerExtensions.get(nodeAId)?.testExtension === true)
+
+    // each peer MUST send exactly one TestExtension message
+    await pWaitFor(() => {
+      const testExtensionRpcs = pushSpy.getCalls()
+        .map((call) => RPC.decode(call.args[0]))
+        .filter((rpc) => rpc.testExtension != null)
+      return testExtensionRpcs.length === 2
+    })
+
+    // and never a second one for the same advertisement
+    pubsubA.handleExtensions(nodeBId, extensionsRpc(), true, GossipsubIDv13)
+    const testExtensionCount = pushSpy.getCalls()
+      .map((call) => RPC.decode(call.args[0]))
+      .filter((rpc) => rpc.testExtension != null)
+      .length
+    expect(testExtensionCount).to.equal(2)
+  })
+
+  it('should not send TestExtension when only one side supports it', async function () {
+    this.timeout(10e4)
+    const pushSpy = sinon.spy(OutboundStream.prototype, 'push')
+    nodes = await createComponentsArray({ number: 2, connected: false })
+    // only node A supports the test extension
+    const withTestExtension = await createComponentsArray({
+      number: 1,
+      connected: false,
+      init: { testExtension: true }
+    })
+    nodes.push(...withTestExtension)
+    const nodeA = withTestExtension[0]
+    const nodeB = nodes[0]
+    const nodeAId = nodeA.components.peerId.toString()
+
+    await connectPubsubNodes(nodeA, nodeB)
+    const pubsubB = nodeB.pubsub as unknown as WithExtensionInternals
+    await pWaitFor(() => pubsubB.peerExtensions.get(nodeAId)?.testExtension === true)
+
+    const testExtensionRpcs = pushSpy.getCalls()
+      .map((call) => RPC.decode(call.args[0]))
+      .filter((rpc) => rpc.testExtension != null)
+    expect(testExtensionRpcs).to.have.length(0)
+  })
+
   it('should drop recorded extensions when the peer disconnects', async function () {
     this.timeout(10e4)
     nodes = await createComponentsArray({
