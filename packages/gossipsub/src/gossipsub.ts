@@ -106,7 +106,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
    * The signature policy to follow by default
    */
   public readonly globalSignaturePolicy: typeof StrictSign | typeof StrictNoSign
-  public protocols: string[] = [constants.GossipsubIDv12, constants.GossipsubIDv11, constants.GossipsubIDv10]
+  public protocols: string[] = [constants.GossipsubIDv13, constants.GossipsubIDv12, constants.GossipsubIDv11, constants.GossipsubIDv10]
 
   private publishConfig: PublishConfig | undefined
 
@@ -263,7 +263,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
 
   private directPeerInitial: ReturnType<typeof setTimeout> | null = null
 
-  public static multicodec: string = constants.GossipsubIDv12
+  public static multicodec: string = constants.GossipsubIDv13
 
   // Options
   readonly opts: Required<GossipOptions>

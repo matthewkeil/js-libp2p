@@ -91,7 +91,7 @@ export interface TopicValidatorFn {
   (peer: PeerId, message: Message): TopicValidatorResult | Promise<TopicValidatorResult>
 }
 
-export const multicodec: string = constants.GossipsubIDv12
+export const multicodec: string = constants.GossipsubIDv13
 
 export interface GossipsubOpts extends GossipsubOptsSpec {
   /** if dial should fallback to floodsub */

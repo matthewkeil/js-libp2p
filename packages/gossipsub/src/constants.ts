@@ -26,13 +26,20 @@ export const GossipsubIDv11 = '/meshsub/1.1.0'
 export const GossipsubIDv12 = '/meshsub/1.2.0'
 
 /**
+ * The protocol ID for version 1.3.0 of the Gossipsub protocol
+ * See the spec for details about how v1.3.0 compares to v1.2.0:
+ * https://github.com/libp2p/specs/blob/master/pubsub/gossipsub/gossipsub-v1.3.md
+ */
+export const GossipsubIDv13 = '/meshsub/1.3.0'
+
+/**
  * An ordered ladder of gossipsub protocol IDs, oldest to newest. Each version is a
  * superset of the one before it, so a protocol's position on the ladder determines
  * which features it supports - see `protocolSupportsFeature`.
  *
  * New protocol versions must be appended to the end of this list.
  */
-export const GossipsubVersionLadder: string[] = [GossipsubIDv10, GossipsubIDv11, GossipsubIDv12]
+export const GossipsubVersionLadder: string[] = [GossipsubIDv10, GossipsubIDv11, GossipsubIDv12, GossipsubIDv13]
 
 /**
  * Gossipsub protocol features that are only available from a minimum protocol version
@@ -47,12 +54,17 @@ export enum GossipsubFeature {
   /**
    * IDONTWANT control messages (gossipsub v1.2+)
    */
-  IDontWant = 'IDontWant'
+  IDontWant = 'IDontWant',
+  /**
+   * The Extensions control message (gossipsub v1.3+)
+   */
+  Extensions = 'Extensions'
 }
 
 const featureMinimumProtocol: Record<GossipsubFeature, string> = {
   [GossipsubFeature.Backoff]: GossipsubIDv11,
-  [GossipsubFeature.IDontWant]: GossipsubIDv12
+  [GossipsubFeature.IDontWant]: GossipsubIDv12,
+  [GossipsubFeature.Extensions]: GossipsubIDv13
 }
 
 /**
