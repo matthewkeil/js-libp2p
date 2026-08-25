@@ -251,6 +251,12 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
   private readonly idontwantCounts = new Map<PeerIdStr, number>()
 
   /**
+   * gossipsub v1.3: the extensions we advertise in the Extensions control message on
+   * every new v1.3+ outbound stream, or null when we support no extensions
+   */
+  private readonly ourExtensions: RPC.ControlExtensions | null
+
+  /**
    * Tracks IDONTWANT messages received by peers and the heartbeat they were received in.
    * Message sends in the forward (per the v1.2 spec) and IWANT response paths are
    * skipped for peers with an entry here.
@@ -318,6 +324,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
       gossipFactor: constants.GossipsubGossipFactor,
       idontwantMinDataSize: constants.GossipsubIdontwantMinDataSize,
       idontwantMaxMessages: constants.GossipsubIdontwantMaxMessages,
+      testExtension: false,
       ...options,
       scoreParams: createPeerScoreParams(options.scoreParams),
       scoreThresholds: createPeerScoreThresholds(options.scoreThresholds)
@@ -325,6 +332,10 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
 
     this.components = components
     this.decodeRpcLimits = opts.decodeRpcLimits ?? defaultDecodeRpcLimits
+
+    // gossipsub v1.3: the extensions we advertise to peers, hard-coded per extension.
+    // null when we support none - the Extensions control message is then omitted
+    this.ourExtensions = opts.testExtension ? { testExtension: true } : null
 
     this.globalSignaturePolicy = opts.globalSignaturePolicy ?? StrictSign
 
@@ -707,10 +718,21 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
         }
       }, { once: true })
 
-      // Immediately send own subscriptions via the newly attached stream
-      if (this.subscriptions.size > 0) {
-        this.log('send subscriptions to', id)
+      if (this.ourExtensions != null && constants.protocolSupportsFeature(protocol, constants.GossipsubFeature.Extensions)) {
+        // gossipsub v1.3: our extensions MUST be in the first message on the stream -
+        // send one immediately, even when we have no subscriptions. sendRpc injects
+        // the extensions and marks them sent
+        this.log('send extensions hello to %s', id)
         this.sendSubscriptions(id, Array.from(this.subscriptions), true)
+      } else {
+        // nothing to advertise on this stream - never reconsider on later sends
+        stream.extensionsSent = true
+
+        // Immediately send own subscriptions via the newly attached stream
+        if (this.subscriptions.size > 0) {
+          this.log('send subscriptions to', id)
+          this.sendSubscriptions(id, Array.from(this.subscriptions), true)
+        }
       }
     } catch (e) {
       this.log.error('createOutboundStream error', e)
@@ -2263,6 +2285,14 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
         tosend.delete(id)
         continue
       }
+      if (!outboundStream.extensionsSent) {
+        // gossipsub v1.3: this stream still owes its first-message extensions
+        // advertisement - route through sendRpc, which handles the injection
+        if (!this.sendRpc(id, rpc)) {
+          tosend.delete(id)
+        }
+        continue
+      }
       try {
         outboundStream.pushPrefixed(prefixedData)
       } catch (e) {
@@ -2437,6 +2467,28 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     if (ihave != null) {
       this.piggybackGossip(id, rpc, ihave)
       this.gossip.delete(id)
+    }
+
+    // gossipsub v1.3: our extensions MUST be included in the first message on the
+    // stream and MUST NOT be sent more than once
+    if (!outboundStream.extensionsSent) {
+      if (this.ourExtensions != null && constants.protocolSupportsFeature(outboundStream.protocol, constants.GossipsubFeature.Extensions)) {
+        // don't mutate the caller's rpc - it may be shared with sends to other peers
+        rpc = {
+          ...rpc,
+          control: {
+            ihave: [],
+            iwant: [],
+            graft: [],
+            prune: [],
+            idontwant: [],
+            ...rpc.control,
+            extensions: this.ourExtensions
+          }
+        }
+        this.metrics?.onExtensionsAdvertised()
+      }
+      outboundStream.extensionsSent = true
     }
 
     const rpcBytes = RPC.encode(rpc)

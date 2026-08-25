@@ -623,6 +623,11 @@ export function getMetrics (
       help: 'Total message sends skipped because the peer sent IDONTWANT for the message',
       labelNames: ['on']
     }),
+    /** Total Extensions control messages we advertised on new streams */
+    extensionsAdvertised: register.gauge({
+      name: 'gossipsub_extensions_advertised_total',
+      help: 'Total Extensions control messages advertised on new outbound streams'
+    }),
     iwantPromiseStarted: register.gauge({
       name: 'gossipsub_iwant_promise_sent_total',
       help: 'Total count of started IWANT promises'
@@ -846,6 +851,10 @@ export function getMetrics (
 
     onIdontwantSkippedSend (on: IDontWantSkipPath): void {
       this.idontwantSkippedSends.inc({ on }, 1)
+    },
+
+    onExtensionsAdvertised (): void {
+      this.extensionsAdvertised.inc(1)
     },
 
     onForwardMsg (topicStr: TopicStr, tosendCount: number): void {

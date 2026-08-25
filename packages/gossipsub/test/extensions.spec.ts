@@ -1,6 +1,13 @@
+import { stop } from '@libp2p/interface'
 import { expect } from 'aegir/chai'
+import { pEvent } from 'p-event'
+import sinon from 'sinon'
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string'
+import { GossipsubIDv12, GossipsubIDv11, GossipsubIDv10 } from '../src/constants.ts'
 import { RPC } from '../src/message/rpc.ts'
+import { OutboundStream } from '../src/stream.ts'
+import { connectPubsubNodes, createComponentsArray } from './utils/create-pubsub.ts'
+import type { GossipSubAndComponents } from './utils/create-pubsub.ts'
 
 const emptyRpc = (): RPC => ({ subscriptions: [], messages: [] })
 const emptyControl = (): RPC.ControlMessage => ({ ihave: [], iwant: [], graft: [], prune: [], idontwant: [] })
@@ -75,5 +82,104 @@ describe('extensions wire format', () => {
     const decoded = RPC.decode(frame)
     expect(decoded.subscriptions).to.have.length(1)
     expect(decoded.subscriptions[0].topic).to.equal('Z')
+  })
+})
+
+describe('extensions handshake - sending', () => {
+  let nodes: GossipSubAndComponents[]
+  let pushSpy: sinon.SinonSpy
+
+  // decode every RPC pushed per stream, in push order
+  const pushedRpcsByStream = (): RPC[][] => {
+    const byStream = new Map<unknown, RPC[]>()
+    for (const call of pushSpy.getCalls()) {
+      const rpcs = byStream.get(call.thisValue) ?? []
+      rpcs.push(RPC.decode(call.args[0]))
+      byStream.set(call.thisValue, rpcs)
+    }
+    return Array.from(byStream.values())
+  }
+
+  beforeEach(() => {
+    nodes = []
+    pushSpy = sinon.spy(OutboundStream.prototype, 'push')
+  })
+
+  afterEach(async () => {
+    sinon.restore()
+    await stop(...nodes.reduce<any[]>((acc, curr) => acc.concat(curr.pubsub, ...Object.entries(curr.components)), []))
+  })
+
+  it('should send extensions in the first message on the stream and never again', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true, allowPublishToZeroTopicPeers: true }
+    })
+
+    // connect before subscribing - the first message on the stream must carry the
+    // extensions even when there are no subscriptions to send
+    await connectPubsubNodes(nodes[0], nodes[1])
+
+    // generate more traffic on the same streams
+    const topic = 'Z'
+    const subscriptionPromises = nodes.map(async (n) => pEvent(n.pubsub, 'subscription-change'))
+    nodes.forEach((n) => { n.pubsub.subscribe(topic) })
+    await Promise.all(subscriptionPromises)
+    await Promise.all(nodes.map(async (n) => pEvent(n.pubsub, 'gossipsub:heartbeat')))
+    await nodes[0].pubsub.publish(topic, uint8ArrayFromString('post-handshake traffic'))
+
+    const streams = pushedRpcsByStream()
+    expect(streams).to.have.length.greaterThan(0)
+
+    for (const rpcs of streams) {
+      // the first RPC on every stream carries our extensions
+      expect(rpcs[0].control?.extensions?.testExtension, 'first RPC must carry extensions').to.be.true()
+      // and no later RPC does
+      for (const rpc of rpcs.slice(1)) {
+        expect(rpc.control?.extensions, 'extensions must not be sent twice').to.be.undefined()
+      }
+    }
+  })
+
+  it('should not send extensions when we support none', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({ number: 2, connected: false })
+
+    await connectPubsubNodes(nodes[0], nodes[1])
+    const topic = 'Z'
+    const subscriptionPromises = nodes.map(async (n) => pEvent(n.pubsub, 'subscription-change'))
+    nodes.forEach((n) => { n.pubsub.subscribe(topic) })
+    await Promise.all(subscriptionPromises)
+
+    for (const rpcs of pushedRpcsByStream()) {
+      for (const rpc of rpcs) {
+        expect(rpc.control?.extensions).to.be.undefined()
+      }
+    }
+  })
+
+  it('should not send extensions on streams below v1.3', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true }
+    })
+    // the remote only speaks v1.2 - our extensions must stay off the wire
+    nodes[1].pubsub.protocols = [GossipsubIDv12, GossipsubIDv11, GossipsubIDv10]
+
+    await connectPubsubNodes(nodes[0], nodes[1])
+    const topic = 'Z'
+    const subscriptionPromises = nodes.map(async (n) => pEvent(n.pubsub, 'subscription-change'))
+    nodes.forEach((n) => { n.pubsub.subscribe(topic) })
+    await Promise.all(subscriptionPromises)
+
+    for (const rpcs of pushedRpcsByStream()) {
+      for (const rpc of rpcs) {
+        expect(rpc.control?.extensions).to.be.undefined()
+      }
+    }
   })
 })

@@ -14,6 +14,13 @@ interface InboundStreamOpts {
 }
 
 export class OutboundStream {
+  /**
+   * Whether our extensions advertisement has been handled for this stream. The
+   * Extensions control message MUST be in the first message on the stream and MUST
+   * NOT be sent more than once (gossipsub v1.3). A replacement stream starts fresh.
+   */
+  public extensionsSent: boolean = false
+
   constructor (private readonly rawStream: Stream, errCallback: (e: Error) => void, opts: OutboundStreamOpts) {
     if (opts.maxBufferSize != null) {
       rawStream.maxWriteBufferLength = opts.maxBufferSize
