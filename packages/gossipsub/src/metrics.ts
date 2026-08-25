@@ -623,6 +623,17 @@ export function getMetrics (
       name: 'gossipsub_extensions_advertised_total',
       help: 'Total Extensions control messages advertised on new outbound streams'
     }),
+    /** Total valid Extensions control messages received from peers */
+    extensionsReceived: register.gauge({
+      name: 'gossipsub_extensions_received_total',
+      help: 'Total valid Extensions control messages received from peers'
+    }),
+    /** Total Extensions control messages ignored for violating the spec rules */
+    extensionsIgnored: register.gauge<{ reason: 'late' | 'wrong-protocol' }>({
+      name: 'gossipsub_extensions_ignored_total',
+      help: 'Total Extensions control messages ignored for violating the spec rules',
+      labelNames: ['reason']
+    }),
     iwantPromiseStarted: register.gauge({
       name: 'gossipsub_iwant_promise_sent_total',
       help: 'Total count of started IWANT promises'
@@ -850,6 +861,14 @@ export function getMetrics (
 
     onExtensionsAdvertised (): void {
       this.extensionsAdvertised.inc(1)
+    },
+
+    onExtensionsReceived (): void {
+      this.extensionsReceived.inc(1)
+    },
+
+    onExtensionsIgnored (reason: 'late' | 'wrong-protocol'): void {
+      this.extensionsIgnored.inc({ reason }, 1)
     },
 
     onForwardMsg (topicStr: TopicStr, tosendCount: number): void {

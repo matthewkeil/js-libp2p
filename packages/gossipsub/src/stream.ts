@@ -63,6 +63,10 @@ export class InboundStream {
   private readonly rawStream: Stream
   private readonly closeController: AbortController
 
+  get protocol (): string {
+    return this.rawStream.protocol
+  }
+
   constructor (rawStream: Stream, opts: InboundStreamOpts = {}) {
     this.rawStream = rawStream
     this.closeController = new AbortController()
