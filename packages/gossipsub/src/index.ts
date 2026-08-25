@@ -203,6 +203,17 @@ export interface GossipsubOpts extends GossipsubOptsSpec {
   decodeRpcLimits?: DecodeRPCLimits
 
   /**
+   * Advertise the experimental TestExtension in the gossipsub v1.3 Extensions
+   * control message and exchange TestExtension messages with peers that also
+   * advertise it. This extension exists purely to test extension interoperability
+   * across implementations - never enable it in production.
+   *
+   * @internal
+   * @default false
+   */
+  testExtension: boolean
+
+  /**
    * If true, will utilize the libp2p connection manager tagging system to prune/graft connections to peers, defaults to true
    */
   tagMeshPeers: boolean
