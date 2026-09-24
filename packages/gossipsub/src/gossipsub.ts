@@ -251,6 +251,25 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
   private readonly idontwantCounts = new Map<PeerIdStr, number>()
 
   /**
+   * gossipsub v1.3: the extensions we advertise in the Extensions control message on
+   * every new v1.3+ outbound stream, or null when we support no extensions
+   */
+  private readonly ourExtensions: RPC.ControlExtensions | null
+
+  /**
+   * gossipsub v1.3: extensions each peer advertised in the first message on its
+   * newest inbound stream. A peer that opens a new stream and does not re-advertise
+   * reads as supporting no extensions.
+   */
+  private readonly peerExtensions = new Map<PeerIdStr, RPC.ControlExtensions>()
+
+  /**
+   * Peers we already sent a TestExtension message to for their current extensions
+   * advertisement - reset together with `peerExtensions`
+   */
+  private readonly testExtensionSent = new Set<PeerIdStr>()
+
+  /**
    * Tracks IDONTWANT messages received by peers and the heartbeat they were received in.
    * Message sends in the forward (per the v1.2 spec) and IWANT response paths are
    * skipped for peers with an entry here.
@@ -264,7 +283,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
 
   private directPeerInitial: ReturnType<typeof setTimeout> | null = null
 
-  public static multicodec: string = constants.GossipsubIDv12
+  public static multicodec: string = constants.GossipsubIDv13
 
   // Options
   readonly opts: Required<GossipOptions>
@@ -318,6 +337,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
       gossipFactor: constants.GossipsubGossipFactor,
       idontwantMinDataSize: constants.GossipsubIdontwantMinDataSize,
       idontwantMaxMessages: constants.GossipsubIdontwantMaxMessages,
+      testExtension: false,
       ...options,
       scoreParams: createPeerScoreParams(options.scoreParams),
       scoreThresholds: createPeerScoreThresholds(options.scoreThresholds)
@@ -325,6 +345,10 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
 
     this.components = components
     this.decodeRpcLimits = opts.decodeRpcLimits ?? defaultDecodeRpcLimits
+
+    // gossipsub v1.3: the extensions we advertise to peers, hard-coded per extension.
+    // null when we support none - the Extensions control message is then omitted
+    this.ourExtensions = opts.testExtension ? { testExtension: true } : null
 
     this.globalSignaturePolicy = opts.globalSignaturePolicy ?? StrictSign
 
@@ -612,6 +636,8 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     if (this.directPeerInitial != null) { clearTimeout(this.directPeerInitial) }
     this.idontwantCounts.clear()
     this.idontwants.clear()
+    this.peerExtensions.clear()
+    this.testExtensionSent.clear()
 
     this.log('stopped')
   }
@@ -707,10 +733,21 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
         }
       }, { once: true })
 
-      // Immediately send own subscriptions via the newly attached stream
-      if (this.subscriptions.size > 0) {
-        this.log('send subscriptions to', id)
+      if (this.ourExtensions != null && constants.protocolSupportsFeature(protocol, constants.GossipsubFeature.Extensions)) {
+        // gossipsub v1.3: our extensions MUST be in the first message on the stream -
+        // send one immediately, even when we have no subscriptions. sendRpc injects
+        // the extensions and marks them sent
+        this.log('send extensions hello to %s', id)
         this.sendSubscriptions(id, Array.from(this.subscriptions), true)
+      } else {
+        // nothing to advertise on this stream - never reconsider on later sends
+        stream.extensionsSent = true
+
+        // Immediately send own subscriptions via the newly attached stream
+        if (this.subscriptions.size > 0) {
+          this.log('send subscriptions to', id)
+          this.sendSubscriptions(id, Array.from(this.subscriptions), true)
+        }
       }
     } catch (e) {
       this.log.error('createOutboundStream error', e)
@@ -743,7 +780,12 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     const inboundStream = new InboundStream(stream, { maxDataLength: this.opts.maxInboundDataLength })
     this.streamsInbound.set(id, inboundStream)
 
-    this.pipePeerReadStream(peerId, inboundStream.source).catch((err) => { this.log(err) })
+    // gossipsub v1.3: peer extensions always reflect the newest inbound stream's first
+    // message - a peer that opens a new stream and stays silent reads as "none"
+    this.peerExtensions.delete(id)
+    this.testExtensionSent.delete(id)
+
+    this.pipePeerReadStream(peerId, inboundStream.source, inboundStream.protocol).catch((err) => { this.log(err) })
   }
 
   /**
@@ -832,6 +874,9 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     // Remove from idontwant tracking
     this.idontwantCounts.delete(id)
     this.idontwants.delete(id)
+    // Remove advertised extensions
+    this.peerExtensions.delete(id)
+    this.testExtensionSent.delete(id)
 
     // Remove from peer scoring
     this.score.removePeer(id)
@@ -898,7 +943,9 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
   /**
    * Responsible for processing each RPC message received by other peers.
    */
-  private async pipePeerReadStream (peerId: PeerId, stream: AsyncIterable<Uint8ArrayList>): Promise<void> {
+  private async pipePeerReadStream (peerId: PeerId, stream: AsyncIterable<Uint8ArrayList>, streamProtocol: string): Promise<void> {
+    let firstMessage = true
+
     try {
       await pipe(stream, async (source) => {
         for await (const data of source) {
@@ -910,6 +957,11 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
             const rpc = this.decodeRpc(rpcBytes)
 
             this.metrics?.onRpcRecv(rpc, rpcBytes.length)
+
+            // gossipsub v1.3: the Extensions control message is only valid in the
+            // first message on the stream
+            this.handleExtensions(peerId.toString(), rpc, firstMessage, streamProtocol)
+            firstMessage = false
 
             // Since processRpc may be overridden entirely in unsafe ways,
             // the simplest/safest option here is to wrap in a function and capture all errors
@@ -975,6 +1027,13 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     this.log(
       `rpc.from ${from.toString()} subscriptions ${subscriptions} messages ${messages} ihave ${ihave} iwant ${iwant} graft ${graft} prune ${prune}`
     )
+
+    // gossipsub v1.3: the TestExtension message carries no behavior beyond proving
+    // that the extension exchange works across implementations
+    if (rpc.testExtension != null) {
+      this.log('received TestExtension message from %p', from)
+      this.metrics?.onTestExtensionReceived()
+    }
 
     // Handle received subscriptions
     if ((rpc.subscriptions != null) && rpc.subscriptions.length > 0) {
@@ -1689,6 +1748,64 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
   }
 
   /**
+   * Handles the gossipsub v1.3 Extensions control message. Only accepted from the
+   * first message on a v1.3+ stream. Runs before RPC processing (and before
+   * acceptFrom scoring), which is harmless: the advertisement is pure metadata
+   * about the peer.
+   *
+   * An Extensions message that is not the first message on its stream - which also
+   * covers a second Extensions message on the same stream - breaks the v1.3 MUST
+   * rules, and the spec says the receiver SHOULD penalize the peer through the P₇
+   * behavioural penalty, so the message is dropped and one behaviour penalty is
+   * added. The spec's exemption for messages a peer could have sent before it
+   * processed our latest subscription change does not apply here: the rule does not
+   * depend on subscription state. An Extensions message on a stream negotiated
+   * below v1.3 is dropped without penalty - that protocol version defines no
+   * Extensions message, so the peer broke no rule of the protocol it is speaking.
+   */
+  private handleExtensions (id: PeerIdStr, rpc: RPC, firstMessage: boolean, streamProtocol: string): void {
+    const extensions = rpc.control?.extensions
+
+    if (extensions == null) {
+      return
+    }
+
+    if (!constants.protocolSupportsFeature(streamProtocol, constants.GossipsubFeature.Extensions)) {
+      this.log('ignoring extensions from %s: stream protocol %s does not support them', id, streamProtocol)
+      this.metrics?.onExtensionsIgnored('wrong-protocol')
+      return
+    }
+
+    if (!firstMessage) {
+      this.log('ignoring extensions from %s: only valid in the first message on the stream', id)
+      this.metrics?.onExtensionsIgnored('late')
+      this.score.addPenalty(id, 1, ScorePenalty.ProtocolViolation)
+      return
+    }
+
+    this.log('peer %s advertised extensions', id)
+    this.peerExtensions.set(id, extensions)
+    this.metrics?.onExtensionsReceived()
+
+    // test-extension spec: if both peers support the TestExtension, each peer MUST
+    // send a TestExtension message
+    if (this.ourExtensions?.testExtension === true && extensions.testExtension === true && !this.testExtensionSent.has(id)) {
+      this.testExtensionSent.add(id)
+      this.log('sending TestExtension message to %s', id)
+      this.metrics?.onTestExtensionSent()
+      this.sendRpc(id, { subscriptions: [], messages: [], testExtension: {} })
+    }
+  }
+
+  /**
+   * Returns true when a peer advertised support for the given extension in the first
+   * message on its newest inbound stream
+   */
+  private peerSupportsExtension (id: PeerIdStr, extension: keyof RPC.ControlExtensions): boolean {
+    return this.peerExtensions.get(id)?.[extension] === true
+  }
+
+  /**
    * Add standard backoff log for a peer in a topic
    */
   private addBackoff (id: PeerIdStr, topic: TopicStr): void {
@@ -2263,6 +2380,14 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
         tosend.delete(id)
         continue
       }
+      if (!outboundStream.extensionsSent) {
+        // gossipsub v1.3: this stream still owes its first-message extensions
+        // advertisement - route through sendRpc, which handles the injection
+        if (!this.sendRpc(id, rpc)) {
+          tosend.delete(id)
+        }
+        continue
+      }
       try {
         outboundStream.pushPrefixed(prefixedData)
       } catch (e) {
@@ -2437,6 +2562,28 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     if (ihave != null) {
       this.piggybackGossip(id, rpc, ihave)
       this.gossip.delete(id)
+    }
+
+    // gossipsub v1.3: our extensions MUST be included in the first message on the
+    // stream and MUST NOT be sent more than once
+    if (!outboundStream.extensionsSent) {
+      if (this.ourExtensions != null && constants.protocolSupportsFeature(outboundStream.protocol, constants.GossipsubFeature.Extensions)) {
+        // don't mutate the caller's rpc - it may be shared with sends to other peers
+        rpc = {
+          ...rpc,
+          control: {
+            ihave: [],
+            iwant: [],
+            graft: [],
+            prune: [],
+            idontwant: [],
+            ...rpc.control,
+            extensions: this.ourExtensions
+          }
+        }
+        this.metrics?.onExtensionsAdvertised()
+      }
+      outboundStream.extensionsSent = true
     }
 
     const rpcBytes = RPC.encode(rpc)
