@@ -1749,9 +1749,19 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
 
   /**
    * Handles the gossipsub v1.3 Extensions control message. Only accepted from the
-   * first message on a v1.3+ stream; violations are ignored without penalty - the
-   * spec defines none. Runs before RPC processing (and before acceptFrom scoring),
-   * which is harmless: the advertisement is pure metadata about the peer.
+   * first message on a v1.3+ stream. Runs before RPC processing (and before
+   * acceptFrom scoring), which is harmless: the advertisement is pure metadata
+   * about the peer.
+   *
+   * An Extensions message that is not the first message on its stream - which also
+   * covers a second Extensions message on the same stream - breaks the v1.3 MUST
+   * rules, and the spec says the receiver SHOULD penalize the peer through the P₇
+   * behavioural penalty, so the message is dropped and one behaviour penalty is
+   * added. The spec's exemption for messages a peer could have sent before it
+   * processed our latest subscription change does not apply here: the rule does not
+   * depend on subscription state. An Extensions message on a stream negotiated
+   * below v1.3 is dropped without penalty - that protocol version defines no
+   * Extensions message, so the peer broke no rule of the protocol it is speaking.
    */
   private handleExtensions (id: PeerIdStr, rpc: RPC, firstMessage: boolean, streamProtocol: string): void {
     const extensions = rpc.control?.extensions
@@ -1769,6 +1779,7 @@ export class GossipSub extends TypedEventEmitter<GossipSubEvents> implements Typ
     if (!firstMessage) {
       this.log('ignoring extensions from %s: only valid in the first message on the stream', id)
       this.metrics?.onExtensionsIgnored('late')
+      this.score.addPenalty(id, 1, ScorePenalty.ProtocolViolation)
       return
     }
 

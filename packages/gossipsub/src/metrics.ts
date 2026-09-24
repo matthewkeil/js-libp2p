@@ -95,7 +95,10 @@ export enum ScorePenalty {
   /// A Peer did not send enough messages as expected.
   MessageDeficit = 'message_deficit',
   /// Too many peers under one IP address.
-  IPColocation = 'IP_colocation'
+  IPColocation = 'IP_colocation',
+  /// A peer sent a message that violates a MUST or MUST NOT rule of the gossipsub spec
+  /// or of an extension it advertised (gossipsub v1.3 "Peer Scoring on Protocol Violations").
+  ProtocolViolation = 'protocol_violation'
 }
 
 export enum IHaveIgnoreReason {

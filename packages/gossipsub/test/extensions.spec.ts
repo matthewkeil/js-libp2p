@@ -16,6 +16,7 @@ import type { Connection } from '@libp2p/interface'
 
 type WithExtensionInternals = Partial<GossipSubClass> & {
   handleExtensions(id: string, rpc: RPC, firstMessage: boolean, streamProtocol: string): void
+  sendRpc(id: string, rpc: RPC): boolean
   peerExtensions: Map<string, RPC.ControlExtensions>
 }
 
@@ -275,24 +276,64 @@ describe('extensions handshake - receiving', () => {
     expect(pubsubA.peerExtensions.size).to.equal(0)
   })
 
-  it('should ignore extensions that are not in the first message on the stream', async () => {
+  it('should ignore and penalize extensions that are not in the first message on the stream', async () => {
     nodes = await createComponentsArray({ number: 1, connected: false })
     const pubsub = nodes[0].pubsub as unknown as WithExtensionInternals
+    const { score } = nodes[0].pubsub
+    score.addPeer('peer-a')
 
     pubsub.handleExtensions('peer-a', extensionsRpc(), false, GossipsubIDv13)
     expect(pubsub.peerExtensions.has('peer-a'), 'late extensions must be ignored').to.be.false()
+    // gossipsub v1.3 "Peer Scoring on Protocol Violations": SHOULD penalize via P₇
+    expect(score.peerStats.get('peer-a')?.behaviourPenalty, 'late extensions must add a behaviour penalty').to.equal(1)
   })
 
-  it('should ignore extensions on streams below v1.3', async () => {
+  it('should ignore extensions on streams below v1.3 without penalty', async () => {
     nodes = await createComponentsArray({ number: 1, connected: false })
     const pubsub = nodes[0].pubsub as unknown as WithExtensionInternals
+    const { score } = nodes[0].pubsub
+    score.addPeer('peer-a')
 
     pubsub.handleExtensions('peer-a', extensionsRpc(), true, GossipsubIDv12)
     expect(pubsub.peerExtensions.has('peer-a'), 'extensions below v1.3 must be ignored').to.be.false()
+    // a v1.2 stream has no Extensions message to violate, so no penalty
+    expect(score.peerStats.get('peer-a')?.behaviourPenalty, 'extensions below v1.3 must not be penalized').to.equal(0)
 
-    // control: same message on a v1.3 stream is recorded
+    // control: same message on a v1.3 stream is recorded, still without penalty
     pubsub.handleExtensions('peer-a', extensionsRpc(), true, GossipsubIDv13)
     expect(pubsub.peerExtensions.get('peer-a')?.testExtension).to.be.true()
+    expect(score.peerStats.get('peer-a')?.behaviourPenalty, 'valid extensions must not be penalized').to.equal(0)
+  })
+
+  it('should penalize a peer that sends extensions after the first message on the stream', async function () {
+    this.timeout(10e4)
+    nodes = await createComponentsArray({
+      number: 2,
+      connected: false,
+      init: { testExtension: true }
+    })
+    const [nodeA, nodeB] = nodes
+    const nodeAId = nodeA.components.peerId.toString()
+    const nodeBId = nodeB.components.peerId.toString()
+
+    await connectPubsubNodes(nodeA, nodeB)
+    const pubsubA = nodeA.pubsub as unknown as WithExtensionInternals
+    const pubsubB = nodeB.pubsub as unknown as WithExtensionInternals
+    await pWaitFor(() => pubsubB.peerExtensions.get(nodeAId)?.testExtension === true, { timeout: 5000 })
+    expect(nodeB.pubsub.score.peerStats.get(nodeAId)?.behaviourPenalty, 'the handshake itself must not be penalized').to.equal(0)
+
+    // A already sent its hello on this stream, so a second RPC carrying an
+    // Extensions message reaches B as a late, duplicate advertisement
+    const lateExtensions = extensionsRpc()
+    if (lateExtensions.control == null) {
+      throw new Error('crafted RPC has no control message')
+    }
+    lateExtensions.control.extensions = { testExtension: false }
+    pubsubA.sendRpc(nodeBId, lateExtensions)
+
+    await pWaitFor(() => nodeB.pubsub.score.peerStats.get(nodeAId)?.behaviourPenalty === 1, { timeout: 5000 })
+    // the late advertisement was dropped, not applied
+    expect(pubsubB.peerExtensions.get(nodeAId)?.testExtension, 'late extensions must not replace the recorded ones').to.be.true()
   })
 
   it('should exchange TestExtension messages when both peers support it', async function () {
